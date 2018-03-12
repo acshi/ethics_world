@@ -1,0 +1,13 @@
+[package]
+name = "ethics_world"
+version = "0.1.0"
+authors = ["Acshi Haggenmiller <acshikh@umich.edu>"]
+
+[dependencies]
+rocket = "0.3.6"
+rocket_codegen = "0.3.6"
+
+[dependencies.rocket_contrib]
+version = "0.3.6"
+default-features = false
+features = ["handlebars_templates", "json"]
