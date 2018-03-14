@@ -1,9 +1,16 @@
 <html>
 <head>
-<link rel='stylesheet' type='text/css' href='resources/styles.css'>
-<script async='' src='resources/scripts.js'></script>
+<!-- <link rel='stylesheet' type='text/css' href='resources/styles.css'> -->
+<script src='resources/scripts.js'></script>
+<script>
+    document.grid = {{grid}};
+    document.buildings = {{buildings}};
+    document.grid_width = {{grid_width}};
+    document.grid_height = document.grid.length / document.grid_width;
+</script>
 </head>
 <body>
 <h1>Ethics World</h1>
+<canvas id="map_canvas" width="300" height="300"></canvas>
 </body>
 </html>
