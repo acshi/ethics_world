@@ -25,7 +25,7 @@ function update_grid() {
     update_color(ctx, document.grid, document.last_grid, 0, '#000000');
     update_color(ctx, document.grid, document.last_grid, 1, '#ff0000');
     update_color(ctx, document.grid, document.last_grid, 2, '#00ff00');
-    update_color(ctx, document.grid, document.last_grid, 3, '#ffff00');
+    // update_color(ctx, document.grid, document.last_grid, 3, '#ffff00');
     update_color(ctx, document.grid, document.last_grid, 4, '#0000ff');
     update_color(ctx, document.grid, document.last_grid, 8, '#ffffff');
 
@@ -45,10 +45,30 @@ function render() {
     var ctx = canvas.getContext("2d");
 
     ctx.drawImage(document.grid_canvas, 0, 0);
+
+    ctx.fillStyle = "#ffff00";
+    for (var i = 0; i < document.agents.pedestrians.length; i++) {
+        var p = document.agents.pedestrians[i];
+        if (!p.on_map) {
+            continue;
+        }
+        ctx.rotate(p.theta);
+        ctx.fillRect(p.x * scale, p.y * scale, p.width * scale, p.length * scale);
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
+    }
 }
 
 function update() {
-    requestAnimationFrame(render);
+    var r = new XMLHttpRequest();
+    r.open("GET", "/agents", true);
+    r.onreadystatechange = function () {
+        if (r.readyState != 4 || r.status != 200) {
+            return;
+        }
+        document.agents = JSON.parse(r.responseText);
+        requestAnimationFrame(render);
+    };
+    r.send();
 }
 
 function init() {
@@ -63,9 +83,11 @@ function init() {
     document.last_grid = [];
     for (var i = 0; i < document.grid.length; i++) document.last_grid[i] = -1;
 
+    document.agents = {pedestrians: [], vehicles: []};
+
     update_grid();
     update();
-    setInterval(update, 5000);
+    setInterval(update, 1000);
 }
 
 window.onload = init;

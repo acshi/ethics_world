@@ -66,11 +66,13 @@ pub struct SearchProblem<'a, T: 'a, QT>
 impl<'a, T: 'a, QT> SearchProblem<'a, T, QT>
     where T: Clone, QT: SearchQueue<SearchNode<T>>
 {
+    #[allow(dead_code)]
     pub fn get_expansion_count(&self) -> i32 {
         self.expansion_count
     }
 }
 
+#[allow(dead_code)]
 pub fn create_search_problem<'a, T, QT>(initial_state: T, problem_traits: &'a SearchProblemTrait<T>,
                                     allow_cycles: bool, debugging: bool)
                                     -> SearchProblem<'a, T, QT>
@@ -103,6 +105,7 @@ pub struct SearchNode<T>
 impl<T> SearchNode<T>
     where T: Clone
 {
+    #[allow(dead_code)]
     pub fn get_expansion_count(&self) -> i32 {
         self.expansion_count
     }
@@ -171,6 +174,7 @@ impl<'a, T, QT> SearchProblemTrait<T> for SearchProblem<'a, T, QT>
     }
 }
 
+#[allow(dead_code)]
 fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<SearchNode<T>>>, state: T, action: i32) -> SearchNode<T>
     where T: Clone, QT: SearchQueue<SearchNode<T>>
 {
@@ -190,6 +194,7 @@ fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<Searc
 }
 
 // result error value indicates whether a depth increase could be helpful
+#[allow(dead_code)]
 fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<SearchNode<T>, bool>
     where T: Clone + Hash + Eq, QT: SearchQueue<SearchNode<T>>
 {
@@ -253,6 +258,7 @@ fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<Searc
     }
 }
 
+#[allow(dead_code)]
 pub fn tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Option<SearchNode<T>>
     where T: Clone + Hash + Eq, QT: SearchQueue<SearchNode<T>>
 {

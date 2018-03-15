@@ -11,7 +11,6 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use] extern crate serde_derive;
 
-use std::hash::{Hash, Hasher};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,6 +23,7 @@ use serde::ser::SerializeSeq;
 use serde::ser::SerializeStruct;
 
 mod general_search;
+#[allow(unused_imports)]
 use general_search::{PriorityQueue, SearchProblemTrait, SearchNode, create_search_problem, tree_search};
 
 // #[derive(Clone)]
@@ -101,7 +101,12 @@ const EXTRA_OBSTACLE_N: usize = 6;
 const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
 const PEDESTRIAN_N: usize = 6; // those on map at one time
 const VEHICLE_N: usize = 6;
-const SPAWN_MARGIN: usize = 5;
+const SPAWN_MARGIN: usize = 5; // clearance from other agents when spawning
+
+// distance at which the pedestrian is considered adjacent to the building
+const BUILDING_PEDESTRIAN_MARGIN: usize = 2;
+// distance (besides crosswalk) at which the vehicle is considered adjacent to the building
+const BUILDING_VEHICLE_MARGIN: usize = 4;
 
 const BUILDING_WIDTH: usize = 3; // just a facade
 const BUILDING_SPACING: usize = 8;
@@ -383,12 +388,14 @@ impl serde::Serialize for Agent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        let mut seq = serializer.serialize_seq(Some(3))?;
-        seq.serialize_element(&self.on_map)?;
-        seq.serialize_element(&self.pose.0)?;
-        seq.serialize_element(&self.pose.1)?;
-        seq.serialize_element(&self.pose.2)?;
-        seq.end()
+        let mut state = serializer.serialize_struct("Agent", 6)?;
+        state.serialize_field("on_map", &self.on_map)?;
+        state.serialize_field("x", &self.pose.0)?;
+        state.serialize_field("y", &self.pose.1)?;
+        state.serialize_field("theta", &self.pose.2)?;
+        state.serialize_field("width", &self.width)?;
+        state.serialize_field("length", &self.length)?;
+        state.end()
     }
 }
 
@@ -406,12 +413,14 @@ struct WorldState {
 
 type LineUsize = ((usize, usize), (usize, usize));
 type LineF32 = ((f32, f32), (f32, f32));
+type RectUsize = [(usize, usize); 4];
+type RectF32 = [(f32, f32); 4];
 
-fn points_to_lines_f32(pts: &[(f32, f32); 4]) -> Vec<LineF32> {
+fn points_to_lines_f32(pts: &RectF32) -> Vec<LineF32> {
     pts.iter().cloned().zip(pts.iter().skip(1).chain(pts.iter().take(1)).cloned()).collect()
 }
 
-fn points_to_lines_usize(pts: &[(usize, usize); 4]) -> Vec<LineUsize> {
+fn points_to_lines_usize(pts: &RectUsize) -> Vec<LineUsize> {
     pts.iter().cloned().zip(pts.iter().skip(1).chain(pts.iter().take(1)).cloned()).collect()
 }
 
@@ -435,7 +444,7 @@ fn dist_1<T>(pts: ((T, T), (T, T))) -> T
 }
 
 // makes the assumption that points form a strict rectangle (only y or x change at a time)
-fn draw_from_perim(pts: &[(usize, usize); 4], existing: &mut Vec<usize>, margin: usize) -> Option<(usize, usize)> {
+fn draw_from_perim(pts: &RectUsize, existing: &mut Vec<usize>, margin: usize) -> Option<(usize, usize)> {
     let mut rng = rand::thread_rng();
 
     let lines = points_to_lines_usize(pts);
@@ -466,8 +475,10 @@ fn draw_from_perim(pts: &[(usize, usize); 4], existing: &mut Vec<usize>, margin:
             let ((x1, y1), (x2, y2)) = line;
             let sx = (x2 as i32 - x1 as i32).signum();
             let sy = (y2 as i32 - y1 as i32).signum();
-            return Some(((x1 as i32 + sx * perim as i32) as usize,
-                         (y1 as i32 + sy * perim as i32) as usize));
+            let pt = ((x1 as i32 + sx * perim_val as i32) as usize,
+                      (y1 as i32 + sy * perim_val as i32) as usize);
+            println!("Chose perim_loc: {} on line: {} ({:?}) sx: {} sy: {} at {:?}", perim_loc, i, line, sx, sy, pt);
+            return Some(pt);
         }
         perim_val -= perim;
     }
@@ -475,12 +486,12 @@ fn draw_from_perim(pts: &[(usize, usize); 4], existing: &mut Vec<usize>, margin:
     None
 }
 
-fn calc_total_perim(pts: &[(usize, usize); 4]) -> usize {
+fn calc_total_perim(pts: &RectUsize) -> usize {
     let lines = points_to_lines_usize(pts);
     lines.into_iter().map(|a| dist_1(a)).sum()
 }
 
-fn draw_from_two_perims(pts_a: &[(usize, usize); 4], pts_b: &[(usize, usize); 4],
+fn draw_from_two_perims(pts_a: &RectUsize, pts_b: &RectUsize,
                         existing_a: &mut Vec<usize>, existing_b: &mut Vec<usize>,
                         margin: usize) -> Option<(usize, usize)> {
     let mut rng = rand::thread_rng();
@@ -516,12 +527,12 @@ fn rotate_pt(pt: (f32, f32), angle: f32) -> (f32, f32) {
 }
 
 // project rectangle onto axis defined by angle and then return (min, max)
-fn project_rect(rect: &[(f32, f32); 4], angle: f32) -> (f32, f32) {
+fn project_rect(rect: &RectF32, angle: f32) -> (f32, f32) {
     let projected = rect.iter().map(|p| rotate_pt(*p, angle).0).collect::<Vec<_>>();
     (projected.iter().fold(f32::MAX, |a, &b| a.min(b)), projected.iter().fold(f32::MIN, |a, &b| a.max(b)))
 }
 
-fn overlaps_rect(q1: &[(f32, f32); 4], q2: &[(f32, f32); 4]) -> bool {
+fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
     // apply the separating axis theorem
     // we loops through the 2 axes of q1, then those of q2
     let q1_lines = points_to_lines_f32(q1);
@@ -542,7 +553,7 @@ fn overlaps_rect(q1: &[(f32, f32); 4], q2: &[(f32, f32); 4]) -> bool {
 
 // if there is an overlap returns the approximate perimeter location of the overlap
 // as elsewhere, this goes through the perimeter clockwise top, right, bottom, left
-fn overlaps_path(agent: &Agent, path: &[(usize, usize); 4], path_width: usize) -> Option<usize> {
+fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize) -> Option<usize> {
     let (width, length) = (agent.width as f32, agent.length as f32);
     let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32, agent.pose.2);
     let rot_width = rotate_pt((width, 0.0), theta);
@@ -571,48 +582,77 @@ fn overlaps_path(agent: &Agent, path: &[(usize, usize); 4], path_width: usize) -
     None
 }
 
-fn find_occupied_perims(agents: &WorldAgents, path: &[(usize, usize); 4], path_width: usize) -> Vec<usize> {
-    let perims1 = agents.pedestrians.iter().filter_map(|a| overlaps_path(a, path, path_width));
-    let perims2 = agents.vehicles.iter().filter_map(|a| overlaps_path(a, path, path_width));
+fn find_occupied_perims(agents: &WorldAgents, path: &RectUsize, path_width: usize) -> Vec<usize> {
+    let perims1 = agents.pedestrians.iter().filter(|a| a.on_map)
+                                    .filter_map(|a| overlaps_path(a, path, path_width));
+    let perims2 = agents.vehicles.iter().filter(|a| a.on_map)
+                                 .filter_map(|a| overlaps_path(a, path, path_width));
     perims1.chain(perims2).collect()
 }
 
+fn draw_off_map_agent(agents: &mut [Agent]) -> &mut Agent {
+    let mut rng = rand::thread_rng();
+    let off_map_agents = agents.iter()
+                               .enumerate()
+                               .filter_map(|(i, a)| if !a.on_map { Some(i) } else { None })
+                               .collect::<Vec<_>>();
+    let i = off_map_agents[rng.gen_range(0, off_map_agents.len())];
+    &mut agents[i]
+}
+
 fn replenish_agents(m: &WorldMap, agents: &mut WorldAgents) {
-    loop {
-        let p_count = agents.pedestrians.iter().filter(|p| p.on_map).count();
-        if p_count >= PEDESTRIAN_N {
+
+    let mut p_count = agents.pedestrians.iter().filter(|p| p.on_map).count();
+
+    let right_outer = BUILDING_WIDTH + m.vert_sidewalk_width + m.horiz_road_length;
+    let bottom_outer = BUILDING_WIDTH + m.horiz_sidewalk_width + m.vert_road_length;
+    let pts_outer = [(BUILDING_WIDTH, BUILDING_WIDTH),
+                     (right_outer, BUILDING_WIDTH),
+                     (right_outer, bottom_outer),
+                     (BUILDING_WIDTH, bottom_outer)];
+
+    let left_inner = BUILDING_WIDTH + m.vert_sidewalk_width + m.vert_road_width;
+    let top_inner = BUILDING_WIDTH + m.horiz_sidewalk_width + m.horiz_road_width;
+    let right_inner = right_outer - m.vert_road_width - m.vert_sidewalk_width;
+    let bottom_inner = bottom_outer - m.horiz_road_width - m.horiz_sidewalk_width;
+    let pts_inner = [(left_inner, top_inner),
+                     (right_inner, top_inner),
+                     (right_inner, bottom_inner),
+                     (left_inner, bottom_inner)];
+
+    let mut on_outer = find_occupied_perims(agents, &pts_outer, SPAWN_MARGIN);
+    let mut on_inner = find_occupied_perims(agents, &pts_inner, SPAWN_MARGIN);
+
+    while p_count < PEDESTRIAN_N {
+        println!("On outer: {:?}", on_outer);
+        println!("On inner: {:?}", on_inner);
+
+        let loc = draw_from_two_perims(&pts_outer, &pts_inner,
+                                       &mut on_outer, &mut on_inner, SPAWN_MARGIN);
+
+        if let Some(loc) = loc {
+            let mut agent = draw_off_map_agent(&mut agents.pedestrians);
+            println!("Drew loc: {:?} and agent: {:?}", loc, agent);
+            agent.on_map = true;
+            agent.pose = (loc.0, loc.1, 0.0);
+            p_count += 1;
+        } else {
+            // no locations are open even though we want to spawn another agent.
+            // Just try again later.
             break;
         }
-
-        let right_outer = BUILDING_WIDTH + m.vert_sidewalk_width + m.horiz_road_length;
-        let bottom_outer = BUILDING_WIDTH + m.horiz_sidewalk_width + m.vert_road_length;
-        let pts_outer = [(BUILDING_WIDTH, BUILDING_WIDTH),
-                         (right_outer, BUILDING_WIDTH),
-                         (right_outer, bottom_outer),
-                         (BUILDING_WIDTH, bottom_outer)];
-
-        let left_inner = BUILDING_WIDTH + m.vert_sidewalk_width + m.vert_road_width;
-        let top_inner = BUILDING_WIDTH + m.horiz_sidewalk_width + m.horiz_road_width;
-        let right_inner = right_outer - m.vert_road_width - m.vert_sidewalk_width;
-        let bottom_inner = bottom_outer - m.horiz_road_width - m.horiz_sidewalk_width;
-        let pts_inner = [(left_inner, top_inner),
-                         (right_inner, top_inner),
-                         (right_inner, bottom_inner),
-                         (left_inner, bottom_inner)];
-
-        let mut on_outer = find_occupied_perims(agents, &pts_outer, SPAWN_MARGIN);
-        let mut on_inner = find_occupied_perims(agents, &pts_inner, SPAWN_MARGIN);
-
-        draw_from_two_perims(&pts_outer, &pts_inner, &mut on_outer, &mut on_inner, SPAWN_MARGIN);
     }
     // let v_count = agents.vehicles.iter().filter(|p| p.on_map).count();
 }
 
 fn create_agents(map: &WorldMap) -> WorldAgents {
-    let mut pedestrians = [Agent::default(); POPULATION_N/2];
-    let mut vehicles = [Agent::default(); POPULATION_N/2];
+    let p = Agent{width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
+    let v = Agent{width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
+    let mut pedestrians = [p; POPULATION_N/2];
+    let mut vehicles = [v; POPULATION_N/2];
 
-    let mut agents = WorldAgents { pedestrians: Box::new(pedestrians), vehicles: Box::new(vehicles) };
+    let mut agents = WorldAgents { pedestrians: Box::new(pedestrians),
+                                   vehicles: Box::new(vehicles) };
     replenish_agents(map, &mut agents);
     agents
 }
