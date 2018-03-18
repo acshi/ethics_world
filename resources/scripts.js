@@ -52,8 +52,25 @@ function render() {
         if (!p.on_map) {
             continue;
         }
-        ctx.rotate(p.theta);
-        ctx.fillRect(p.x * scale, p.y * scale, p.width * scale, p.length * scale);
+        ctx.translate(p.x * scale, p.y * scale)
+        ctx.rotate(-p.theta);
+        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
+    }
+
+    ctx.fillStyle = "#00ffff";
+    for (var i = 0; i < document.agents.vehicles.length; i++) {
+        var p = document.agents.vehicles[i];
+        if (!p.on_map) {
+            continue;
+        }
+        ctx.translate(p.x * scale, p.y * scale)
+        ctx.rotate(-p.theta);
+        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.fillStyle = "#0088ff";
+        ctx.fillRect(0, 0, scale, scale);
+        ctx.strokeRect(0, 0, p.width * scale, p.length * scale);
+        ctx.fillStyle = "#00ffff";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
     }
 }
@@ -87,7 +104,8 @@ function init() {
 
     update_grid();
     update();
-    setInterval(update, 1000);
+    // setInterval(update, 1000);
 }
 
+document.render_map = render;
 window.onload = init;
