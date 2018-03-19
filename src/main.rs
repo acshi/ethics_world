@@ -501,15 +501,50 @@ fn difference<T>(a: T, b: T) -> T
     if a > b { a - b } else  { b - a }
 }
 
+fn pose_size_to_bounding_rect(p: (usize, usize, f32), size: (usize, usize))
+                              -> ((usize, usize), (usize, usize)) {
+    let (x, y, t) = p;
+    let (sx, sy) = size;
+
+    let rw = rotate_pt((sx as f32, 0.0), -t);
+    let rw = (rw.0 as i32, rw.1 as i32);
+    let rl = rotate_pt((0.0, sy as f32), -t);
+    let rl = (rl.0 as i32, rl.1 as i32);
+
+    let (x, y) = (x as i32, y as i32);
+
+    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0) as usize;
+    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1) as usize;
+    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0) as usize;
+    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1) as usize;
+
+    ((min_x, min_y), (max_x, max_y))
+}
+
 // manhattan distance/1 norm, considers that the positions are upper-left corners
 // and that the objects have their sizes expanding to the right and down.
-fn obj_dist_1<T>(a: (T, T), size_a: (T, T), b: (T, T), size_b: (T, T)) -> T
-    where T: std::ops::Add<Output=T> + std::ops::Sub<Output=T> + PartialOrd
+// uses the bounding box of the rotated objects since this is mainly intended for
+// dealing only with rotations that are multiples of 90 degrees.
+// xxx yyy = 1
+// xxx
+//   yyy = 0 (-1)
+fn obj_dist_1(a: (usize, usize, f32), size_a: (usize, usize),
+              b: (usize, usize, f32), size_b: (usize, usize)) -> usize
 {
-    let ((x1, y1), (x2, y2)) = (a, b);
-    let ((sx1, sy1), (sx2, sy2)) = (size_a, size_b);
-    return if x1 > x2 { difference(x1, x2 + sx2) } else { difference(x2, x1 + sx1) } +
-           if y1 > y2 { difference(y1, y2 + sy2) } else { difference(y2, y1 + sy1) };
+    // l for low (min) and h for high (max)
+    let ((lx1, ly1), (hx1, hy1)) = pose_size_to_bounding_rect(a, size_a);
+    let ((lx2, ly2), (hx2, hy2)) = pose_size_to_bounding_rect(b, size_b);
+    let x_diff = if lx1 < lx2 {
+        if hx1 < lx2 { lx2 - hx1 } else { 0 }
+    } else {
+        if hx2 < lx1 { lx1 - hx2 } else { 0 }
+    };
+    let y_diff = if ly1 < ly2 {
+        if hy1 < ly2 { ly2 - hy1 } else { 0 }
+    } else {
+        if hy2 < ly1 { ly1 - hy2 } else { 0 }
+    };
+    x_diff + y_diff
 }
 
 fn calc_total_perim(pts: &RectUsize) -> usize {
@@ -517,26 +552,107 @@ fn calc_total_perim(pts: &RectUsize) -> usize {
     lines.into_iter().map(|a| dist_1(a)).sum()
 }
 
-fn perim_i_to_pt(perim_i: usize, perims: &Vec<usize>, lines: &Vec<LineUsize>) -> (usize, usize) {
+// fn perim_i_to_pt(perim_i: usize, perims: &Vec<usize>, lines: &Vec<LineUsize>) -> (usize, usize) {
+//     let mut perim_val = perim_i;
+//     for i in 0..lines.len() {
+//         let line = lines[i];
+//         let perim = perims[i];
+//         if perim_val < perim {
+//             let ((x1, y1), (x2, y2)) = line;
+//             let sx = (x2 as i32 - x1 as i32).signum();
+//             let sy = (y2 as i32 - y1 as i32).signum();
+//             let pt = ((x1 as i32 + sx * perim_val as i32) as usize,
+//                       (y1 as i32 + sy * perim_val as i32) as usize);
+//             // include the boundary such that results look like they are from [min, max)
+//             // even when we actually iterate from high to low
+//             let pt = (pt.0 - if sx == -1 { 1 } else { 0 },
+//                       pt.1 - if sy == -1 { 1 } else { 0 });
+//             return pt;
+//         }
+//         perim_val -= perim;
+//     }
+//     panic!("Perim_i {} is invalid, exceeds perimeter total {}", perim_i, perims.iter().sum::<usize>());
+// }
+
+fn perim_i_to_pose(m: &WorldMap, perim_i: usize, perims: &Vec<usize>, lines: &Vec<LineUsize>,
+                   size: (usize, usize), is_inner: bool) -> Option<(usize, usize, f32)> {
+    let perim_total = perims.iter().sum();
+    if perim_i >= perim_total {
+        panic!("Perim_i {} is invalid, exceeds perimeter total {}", perim_i, perim_total);
+    }
+
     let mut perim_val = perim_i;
-    for i in 0..lines.len() {
-        let line = lines[i];
-        let perim = perims[i];
+    let mut line_i = 0;
+    for (i, &perim) in perims.iter().enumerate() {
         if perim_val < perim {
-            let ((x1, y1), (x2, y2)) = line;
-            let sx = (x2 as i32 - x1 as i32).signum();
-            let sy = (y2 as i32 - y1 as i32).signum();
-            let pt = ((x1 as i32 + sx * perim_val as i32) as usize,
-                      (y1 as i32 + sy * perim_val as i32) as usize);
-            // include the boundary such that results look like they are from [min, max)
-            // even when we actually iterate from high to low
-            let pt = (pt.0 - if sx == -1 { 1 } else { 0 },
-                      pt.1 - if sy == -1 { 1 } else { 0 });
-            return pt;
+            line_i = i;
+            break;
         }
         perim_val -= perim;
     }
-    panic!("Perim_i {} is invalid, exceeds perimeter total {}", perim_i, perims.iter().sum::<usize>());
+
+    // first get exact point on the perimeter
+    let ((x1, y1), (x2, y2)) = lines[line_i];
+    let sx = (x2 as i32 - x1 as i32).signum();
+    let sy = (y2 as i32 - y1 as i32).signum();
+    let pt = ((x1 as i32 + sx * perim_val as i32) as usize,
+              (y1 as i32 + sy * perim_val as i32) as usize);
+    // include the boundary such that results look like they are from [min, max)
+    // even when we actually iterate from high to low
+    let pt = (pt.0 - if sx == -1 { 1 } else { 0 },
+              pt.1 - if sy == -1 { 1 } else { 0 });
+
+    // transform that initial point to a pose that takes into account
+    // size of the object and its orientation (based on the line it is on)
+    if is_inner {
+        if line_i == 0 {
+            if pt.0 < x1 + size.1 - m.vert_road_width / 2 {
+                return None;
+            }
+            return Some((pt.0 + 1, pt.1 - size.0, -consts::PI / 2.0));
+        } else if line_i == 1 {
+            if pt.1 < y1 + size.1 - m.horiz_road_width / 2 {
+                return None;
+            }
+            return Some((pt.0 + size.0, pt.1 + 1, consts::PI));
+        } else if line_i == 2 {
+            if pt.0 > x1 - size.1 + m.vert_road_width / 2 {
+                return None;
+            }
+            return Some((pt.0, pt.1 + size.0, consts::PI / 2.0));
+        } else if line_i == 3 {
+            if pt.1 > y1 - size.1 + m.horiz_road_width / 2 {
+                return None;
+            }
+            return Some((pt.0 - size.0, pt.1, 0.0));
+        } else {
+            panic!("Should not be possible");
+        }
+    } else {
+        if line_i == 0 {
+            if pt.0 > x2 - size.0 {
+                return None;
+            }
+            return Some((pt.0, pt.1 + size.0, consts::PI / 2.0));
+        } else if line_i == 1 {
+            if pt.1 > y2 - size.0 {
+                return None;
+            }
+            return Some((pt.0 - size.0, pt.1, 0.0));
+        } else if line_i == 2 {
+            if pt.0 < x2 + size.0 {
+                return None;
+            }
+            return Some((pt.0, pt.1 - size.0, -consts::PI / 2.0));
+        } else if line_i == 3 {
+            if pt.1 > y2 + size.0 {
+                return None;
+            }
+            return Some((pt.0 + size.0, pt.1, consts::PI));
+        } else {
+            panic!("Should not be possible");
+        }
+    }
 }
 
 // tries to find a "spawn" pose (x, y, theta) for agent with size (width, length)
@@ -562,9 +678,15 @@ fn spawn_from_perim(m: &WorldMap, building: (usize, usize), building_margin: usi
         let perim_choices = perim_choices.filter(|&i|
                                 a_to_b_mod(i + perim_total - margin, i + margin + 1, perim_total)
                                 .iter().all(|&j| !occupied[j]));
-        let perim_choices = perim_choices.filter(|&i|
-                            obj_dist_1(building, (BUILDING_WIDTH, BUILDING_WIDTH),
-                                   perim_i_to_pt(i, &perims, &lines), size) <= building_margin);
+        let perim_choices = perim_choices.filter(|&i| {
+            let pose = perim_i_to_pose(m, i, &perims, &lines, size, is_inner);
+            if pose.is_none() {
+                return false;
+            }
+            let pose = pose.unwrap();
+            obj_dist_1((building.0, building.1, 0.0),
+                       (BUILDING_WIDTH, BUILDING_WIDTH), pose, size) <= building_margin
+        });
         let perim_choices = perim_choices.collect::<Vec<_>>();
 
         // let mut min_d = usize::max_value();
@@ -581,61 +703,12 @@ fn spawn_from_perim(m: &WorldMap, building: (usize, usize), building_margin: usi
         perim_loc = *rng.choose(&perim_choices)?;
     }
 
-    let pt = perim_i_to_pt(perim_loc, &perims, &lines);
+    let pose = perim_i_to_pose(m, perim_loc, &perims, &lines, size, is_inner)?;
+    let dist = obj_dist_1((building.0, building.1, 0.0),
+                          (BUILDING_WIDTH, BUILDING_WIDTH), pose, size);
 
-    // calculate pose from the line that we are on
-    let mut perim_val = perim_loc;
-    let mut line_i = 4;
-    for (i, &perim) in perims.iter().enumerate() {
-        if perim_val < perim {
-            line_i = i;
-            break;
-        }
-        perim_val -= perim;
-    }
-
-    let ((x1, y1), (x2, y2)) = lines[line_i];
-    let pose;
-    if is_inner {
-        if line_i == 0 {
-            if pt.0 < x1 + size.1 - m.vert_road_width / 2 {
-                return None;
-            }
-            pose = (pt.0 + 1, pt.1 - size.0, -consts::PI / 2.0);
-        } else if line_i == 1 {
-            if pt.1 < y1 + size.1 - m.horiz_road_width / 2 {
-                return None;
-            }
-            pose = (pt.0 + size.0, pt.1 + 1, consts::PI);
-        } else if line_i == 2 {
-            if pt.0 > x1 - size.1 + m.vert_road_width / 2 {
-                return None;
-            }
-            pose = (pt.0, pt.1 + size.0, consts::PI / 2.0);
-        } else if line_i == 3 {
-            if pt.1 > y1 - size.1 + m.horiz_road_width / 2 {
-                return None;
-            }
-            pose = (pt.0 - size.0, pt.1, 0.0);
-        } else {
-            panic!("Should not be possible");
-        }
-    } else {
-        if line_i == 0 {
-            pose = (pt.0.min(x2 - size.0), pt.1 + size.0, consts::PI / 2.0);
-        } else if line_i == 1 {
-            pose = (pt.0 - size.0, pt.1.min(y2 - size.0), 0.0);
-        } else if line_i == 2 {
-            pose = (pt.0.max(x2 + size.0), pt.1 - size.0, -consts::PI / 2.0);
-        } else if line_i == 3 {
-            pose = (pt.0 + size.0, pt.1.max(y2 + size.0), consts::PI);
-        } else {
-            panic!("Should not be possible");
-        }
-    }
-
-    println!("Chose perim_loc: {} at {:?} with pose {:?}",
-             perim_loc, pt, pose);
+    println!("Chose perim_loc: {} at dist {} from building {:?}, with pose {:?}",
+             perim_loc, dist, building, pose);
 
     Some(pose)
 }
@@ -720,7 +793,7 @@ fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: b
                       (x + rot_length.0, y + rot_length.1)];
 
     let path_lines = points_usize_to_lines_f32(path);
-    println!("len: {}", path_lines.len());
+    // println!("len: {}", path_lines.len());
     let mut perim_loc = 0;
     for (i, &line) in path_lines.iter().enumerate() {
         let ((x1, y1), (x2, y2)) = line;
@@ -751,9 +824,9 @@ fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: b
                          (x2, y2 + path_width),
                          (x2, y2)];
         }
-        println!("Path line rect {}: {:?}", i, line_rect);
+        // println!("Path line rect {}: {:?}", i, line_rect);
         if overlaps_rect(&agent_rect, &line_rect) {
-            println!("Overlaps");
+            // println!("Overlaps");
             let perim_pos = if x1_eq_x2 { (y - y1).abs() } else { (x - x1).abs() };
             return Some(perim_loc + perim_pos as usize);
         }
