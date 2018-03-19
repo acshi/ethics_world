@@ -55,6 +55,9 @@ function render() {
         ctx.translate(p.x * scale, p.y * scale)
         ctx.rotate(-p.theta);
         ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.fillStyle = "#ee6600";
+        ctx.fillRect(0, 0, p.width * scale * 2 / 3, p.length * scale * 2 / 3);
+        ctx.fillStyle = "#ffff00";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
     }
 

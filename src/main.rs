@@ -99,11 +99,11 @@ const MAP_HEIGHT: usize = 70;
 const MAP_SIZE: usize = MAP_WIDTH * MAP_HEIGHT;
 const BUILDING_N: usize = 30;
 const CROSSWALK_N: usize = 6;
-const EXTRA_OBSTACLE_N: usize = 6;
-const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
-const PEDESTRIAN_N: usize = 6; // those on map at one time
-const VEHICLE_N: usize = 6;
-const SPAWN_MARGIN: usize = 5; // clearance from other agents when spawning
+// const EXTRA_OBSTACLE_N: usize = 6;
+const POPULATION_N: usize = 48; // one-half this for each of pedestrians and vehicles
+const PEDESTRIAN_N: usize = 24; // those on map at one time
+const VEHICLE_N: usize = 12;
+const SPAWN_MARGIN: usize = 3; // clearance from other agents when spawning
 
 const BUILDING_WIDTH: usize = 3; // just a facade
 const BUILDING_SPACING: usize = 12;
@@ -117,10 +117,12 @@ const SIDEWALK_MAX_WIDTH: usize = 6;
 const LANE_MIN_WIDTH: usize = 6;
 const LANE_MAX_WIDTH: usize = 10;
 
+const ATTEMPTS: usize = 100;
+
 // distance at which the pedestrian is considered adjacent to the building
 const BUILDING_PEDESTRIAN_MARGIN: usize = 3;
 // distance (besides crosswalk) at which the vehicle is considered adjacent to the building
-const BUILDING_VEHICLE_MARGIN: usize = 5;
+const BUILDING_VEHICLE_MARGIN: usize = 6;
 
 bitflags! {
     struct Cell: u8 {
@@ -199,7 +201,6 @@ fn create_buildings(m: &mut WorldMap) {
     let mut chosen_perims = [0usize; BUILDING_N];
     for i in 0..BUILDING_N {
         let mut perim_loc;
-        let attempts = 100;
         let mut attempt_i = 0;
         loop {
             perim_loc = rng.gen_range(0, total_perim);
@@ -221,7 +222,7 @@ fn create_buildings(m: &mut WorldMap) {
             }
 
             attempt_i += 1;
-            if attempt_i > attempts {
+            if attempt_i > ATTEMPTS {
                 return; // probably no solution is left for current choices.
             }
         }
@@ -297,7 +298,6 @@ fn create_crosswalks(m: &mut WorldMap) {
     let mut chosen_crosswalks = [0usize; CROSSWALK_N];
     for i in 0..CROSSWALK_N {
         let mut perim_loc;
-        let attempts = 100;
         let mut attempts_i = 0;
         loop {
             perim_loc = rng.gen_range(0, crosswalk_perim);
@@ -306,7 +306,7 @@ fn create_crosswalks(m: &mut WorldMap) {
                 break;
             }
             attempts_i += 1;
-            if attempts_i > attempts {
+            if attempts_i > ATTEMPTS {
                 return; // probably constrained to not get all of them
             }
         }
@@ -513,10 +513,10 @@ fn pose_size_to_bounding_rect(p: (usize, usize, f32), size: (usize, usize))
 
     let (x, y) = (x as i32, y as i32);
 
-    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0) as usize;
-    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1) as usize;
-    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0) as usize;
-    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1) as usize;
+    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).max(0) as usize;
+    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).max(0) as usize;
+    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).max(0) as usize;
+    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).max(0) as usize;
 
     ((min_x, min_y), (max_x, max_y))
 }
@@ -630,22 +630,22 @@ fn perim_i_to_pose(m: &WorldMap, perim_i: usize, perims: &Vec<usize>, lines: &Ve
         }
     } else {
         if line_i == 0 {
-            if pt.0 > x2 - size.0 {
+            if pt.0 > x2 - size.1 {
                 return None;
             }
             return Some((pt.0, pt.1 + size.0, consts::PI / 2.0));
         } else if line_i == 1 {
-            if pt.1 > y2 - size.0 {
+            if pt.1 > y2 - size.1 {
                 return None;
             }
             return Some((pt.0 - size.0, pt.1, 0.0));
         } else if line_i == 2 {
-            if pt.0 < x2 + size.0 {
+            if pt.0 < x2 + size.1 {
                 return None;
             }
             return Some((pt.0, pt.1 - size.0, -consts::PI / 2.0));
         } else if line_i == 3 {
-            if pt.1 > y2 + size.0 {
+            if pt.1 < y2 + size.1 {
                 return None;
             }
             return Some((pt.0 + size.0, pt.1, consts::PI));
@@ -707,7 +707,7 @@ fn spawn_from_perim(m: &WorldMap, building: (usize, usize), building_margin: usi
     let dist = obj_dist_1((building.0, building.1, 0.0),
                           (BUILDING_WIDTH, BUILDING_WIDTH), pose, size);
 
-    println!("Chose perim_loc: {} at dist {} from building {:?}, with pose {:?}",
+    println!("Chose perim_loc: {} at dist {} from building {:?}, with pose {:?}\n",
              perim_loc, dist, building, pose);
 
     Some(pose)
@@ -723,21 +723,22 @@ fn spawn_on_two_perims(m: &WorldMap, buildings: &[(usize, usize)], building_marg
                        margin: usize) -> Option<(usize, usize, f32)> {
     let mut rng = rand::thread_rng();
 
-    let attempts = 200;
-    let mut res: Option<(usize, usize, f32)> = None;
-    let mut i = 0;
-    while i < attempts && res.is_none() {
-        let building = *rng.choose(buildings)?;
+    let mut ordering = (0..buildings.len()).collect::<Vec<_>>();
+    rng.shuffle(&mut ordering);
+    for i in ordering {
+        let building = buildings[i];
 
-        // res = spawn_from_perim(m, building, building_margin, size,
-        //                        pts_a, occupied_a, margin, false);
+        let mut res = spawn_from_perim(m, building, building_margin, size,
+                                       pts_a, occupied_a, margin, false);
         if res.is_none() {
             res = spawn_from_perim(m, building, building_margin, size,
                                    pts_b, occupied_b, margin, true);
         }
-        i += 1;
+        if res.is_some() {
+            return res;
+        }
     }
-    res
+    None
 }
 
 fn lines_to_normals(lines: &Vec<LineF32>) -> Vec<f32> {
@@ -780,7 +781,7 @@ fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
 
 // if there is an overlap returns the approximate perimeter location of the overlap.
 // as elsewhere, this goes through the perimeter clockwise top, right, bottom, left
-fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: bool) -> Option<usize> {
+fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: bool) -> Vec<usize> {
     let path_width = path_width as f32;
 
     let (width, length) = (agent.width as f32, agent.length as f32);
@@ -791,6 +792,8 @@ fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: b
                       (x + rot_width.0, y + rot_width.1),
                       (x + rot_width.0 + rot_length.0, y + rot_width.1 + rot_length.1),
                       (x + rot_length.0, y + rot_length.1)];
+
+    let mut overlap_locs = Vec::new();
 
     let path_lines = points_usize_to_lines_f32(path);
     // println!("len: {}", path_lines.len());
@@ -828,12 +831,12 @@ fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: b
         if overlaps_rect(&agent_rect, &line_rect) {
             // println!("Overlaps");
             let perim_pos = if x1_eq_x2 { (y - y1).abs() } else { (x - x1).abs() };
-            return Some(perim_loc + perim_pos as usize);
+            overlap_locs.push(perim_loc + perim_pos as usize);
         }
         perim_loc += dist_1(line) as usize;
     }
 
-    None
+    overlap_locs
 }
 
 // range like [a, b), but can go by +1 or -1
@@ -920,11 +923,10 @@ fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize, path_width: u
             continue;
         }
 
-        let overlap_loc = overlaps_path(agent, path, path_width as usize, is_inner);
-        if overlap_loc.is_none() {
+        let overlap_locs = overlaps_path(agent, path, path_width as usize, is_inner);
+        if overlap_locs.len() == 0 {
             continue;
         }
-        let overlap_loc = overlap_loc.unwrap();
 
         let (width, length) = (agent.width as f32, agent.length as f32);
         let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32, agent.pose.2);
@@ -945,30 +947,42 @@ fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize, path_width: u
             if occupied_perims[perim_loc] {
                 continue;
             }
-            let overlap_loc_dist_sq = mod_dist(perim_loc, overlap_loc, perim_total).pow(2);
-            if overlap_loc_dist_sq > agent_max_dim_sq {
+
+            let mut should_skip = true;
+            for &overlap_loc in &overlap_locs {
+                let overlap_loc_dist_sq = mod_dist(perim_loc, overlap_loc, perim_total).pow(2);
+                if overlap_loc_dist_sq <= agent_max_dim_sq {
+                    should_skip = false;
+                    break;
+                }
+                // println!("Vote to skip perim_loc {} with mod_dist_sq {} < than {}", perim_loc, overlap_loc_dist_sq, agent_max_dim_sq);
+            }
+            if should_skip {
                 continue;
             }
 
             if overlaps_rect(&agent_rect, &cell_rect) {
                 occupied_perims[perim_loc] = true;
-            //     println!("Overlaps perim_loc w/ cell rect {:?}", cell_rect);
+            //     println!("Overlaps perim_loc {} w/ cell rect {:?}", perim_loc, cell_rect);
             // } else {
-            //     println!("Does not overlap perim_loc w/ cell rect {:?}", cell_rect);
+            //     println!("Does not overlap perim_loc {} w/ cell rect {:?}", perim_loc, cell_rect);
             }
         }
     }
     occupied_perims
 }
 
-fn draw_off_map_agent(agents: &mut [Agent]) -> &mut Agent {
+fn draw_off_map_agent_i(agents: &mut [Agent]) -> Option<usize> {
     let mut rng = rand::thread_rng();
     let off_map_agents = agents.iter()
                                .enumerate()
                                .filter_map(|(i, a)| if !a.on_map { Some(i) } else { None })
                                .collect::<Vec<_>>();
+    if off_map_agents.len() == 0 {
+        return None
+    }
     let i = off_map_agents[rng.gen_range(0, off_map_agents.len())];
-    &mut agents[i]
+    Some(i)
 }
 
 fn setup_map_paths(m: &mut WorldMap) {
@@ -1023,6 +1037,12 @@ fn setup_map_paths(m: &mut WorldMap) {
 fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
     let mut p_count = agents.pedestrians.iter().filter(|p| p.on_map).count();
     while p_count < PEDESTRIAN_N {
+        let agent_i = draw_off_map_agent_i(&mut agents.pedestrians);
+        if agent_i.is_none() {
+            break; // no agents left to draw
+        }
+        let agent_i = agent_i.unwrap();
+
         let path_width = m.vert_sidewalk_width.max(m.horiz_sidewalk_width);
         let on_outer = calc_occupied_perim_map(agents, &m.pedestrian_outer_pts, path_width, false);
         let on_inner = calc_occupied_perim_map(agents, &m.pedestrian_inner_pts, path_width, true);
@@ -1036,7 +1056,7 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
                                        &on_outer, &on_inner, SPAWN_MARGIN);
 
         if let Some(pose) = pose {
-            let mut agent = draw_off_map_agent(&mut agents.pedestrians);
+            let mut agent = &mut agents.pedestrians[agent_i];
             println!("Drew pose: {:?} and pedestrian: {:?}", pose, agent);
             agent.on_map = true;
             agent.pose = pose;
@@ -1053,7 +1073,13 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
     let mut v_count = agents.vehicles.iter().filter(|p| p.on_map).count();
 
     while v_count < VEHICLE_N {
-        let path_width = m.vert_road_width.max(m.horiz_road_width);
+        let agent_i = draw_off_map_agent_i(&mut agents.vehicles);
+        if agent_i.is_none() {
+            break; // no agents left to draw
+        }
+        let agent_i = agent_i.unwrap();
+
+        let path_width = m.vert_road_width.max(m.horiz_road_width) / 2;
         let on_outer = calc_occupied_perim_map(agents, &m.vehicle_outer_pts, path_width, false);
         let on_inner = calc_occupied_perim_map(agents, &m.vehicle_inner_pts, path_width, true);
 
@@ -1066,7 +1092,7 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
                                        &on_outer, &on_inner, SPAWN_MARGIN);
 
         if let Some(pose) = pose {
-            let mut agent = draw_off_map_agent(&mut agents.vehicles);
+            let mut agent = &mut agents.vehicles[agent_i];
             println!("Drew pose: {:?} and vehicle: {:?}", pose, agent);
             agent.on_map = true;
             agent.pose = pose;
@@ -1080,9 +1106,13 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
 }
 
 
-fn create_agents(map: &WorldMap) -> WorldAgents {
-    let p = Agent{width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
-    let v = Agent{width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
+fn create_agents() -> WorldAgents {
+    let mut p = Agent{width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
+    p.folk_theory = 1.0;
+
+    let mut v = Agent{width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
+    v.folk_theory = 1.0;
+
     let pedestrians = [p; POPULATION_N/2];
     let vehicles = [v; POPULATION_N/2];
 
@@ -1115,7 +1145,7 @@ fn main() {
     let mut map = create_map();
     setup_map_paths(&mut map);
 
-    let mut agents = create_agents(&map);
+    let mut agents = create_agents();
     setup_agents(&map, &mut agents);
     let state = WorldState {map, agents: Arc::new(Mutex::new(agents))};
 
