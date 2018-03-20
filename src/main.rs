@@ -7,6 +7,7 @@ extern crate rocket;
 use rocket_contrib::Template;
 #[macro_use] extern crate bitflags;
 extern crate rand;
+#[macro_use] extern crate rand_derive;
 extern crate serde;
 extern crate serde_json;
 #[macro_use] extern crate serde_derive;
@@ -15,6 +16,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::f32::{self, consts};
+use std::thread;
 use rocket::{State};
 use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
@@ -100,7 +102,7 @@ const MAP_SIZE: usize = MAP_WIDTH * MAP_HEIGHT;
 const BUILDING_N: usize = 30;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: usize = 6;
-const POPULATION_N: usize = 48; // one-half this for each of pedestrians and vehicles
+const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
 const PEDESTRIAN_N: usize = 24; // those on map at one time
 const VEHICLE_N: usize = 12;
 const SPAWN_MARGIN: usize = 3; // clearance from other agents when spawning
@@ -178,7 +180,8 @@ impl serde::Serialize for WorldMap {
     }
 }
 
-fn fill_map_rect(grid: &mut [Cell], left: usize, top: usize, width: usize, height: usize, mask: Cell) {
+fn fill_map_rect(grid: &mut [Cell], left: usize, top: usize,
+                                    width: usize, height: usize, mask: Cell) {
     // println!("left: {} top: {} width: {} height: {}", left, top, width, height);
     for y in top..(top + height) {
         let mut grid_i = y * MAP_WIDTH + left;
@@ -199,33 +202,40 @@ fn create_buildings(m: &mut WorldMap) {
                                     ) * 2;
     let total_perim = outer_perim + inner_perim;
     let mut chosen_perims = [0usize; BUILDING_N];
+
+    let mut ordering = (0..total_perim).collect::<Vec<_>>();
+    rng.shuffle(&mut ordering);
+    let mut next_ordering_i = 0;
+
     for i in 0..BUILDING_N {
-        let mut perim_loc;
-        let mut attempt_i = 0;
-        loop {
-            perim_loc = rng.gen_range(0, total_perim);
+        let mut perim_loc = 99999;
+        for &perim_i in ordering.iter().skip(next_ordering_i) {
             // check that existing buildings are far enough away
             // only compare with those on the correct inner/outer path
-            if perim_loc < outer_perim {
+            if perim_i < outer_perim {
                 if chosen_perims.iter().take(i).all(|&p|
                         p >= outer_perim ||
-                        mod_dist(p, perim_loc, outer_perim) > BUILDING_SPACING) {
+                        mod_dist(p, perim_i, outer_perim) > BUILDING_SPACING) {
+                    perim_loc = perim_i;
+                    next_ordering_i += 1;
                     break;
                 }
             } else {
-                let perim_loc = perim_loc - outer_perim;
                 if chosen_perims.iter().take(i).all(|&p|
                         p < outer_perim ||
-                        mod_dist(p - outer_perim, perim_loc, inner_perim) > BUILDING_SPACING) {
+                        mod_dist(p - outer_perim, perim_i - outer_perim, inner_perim)
+                            > BUILDING_SPACING) {
+                    perim_loc = perim_i;
+                    next_ordering_i += 1;
                     break;
                 }
             }
-
-            attempt_i += 1;
-            if attempt_i > ATTEMPTS {
-                return; // probably no solution is left for current choices.
-            }
+            next_ordering_i += 1;
         }
+        if next_ordering_i >= ordering.len() {
+            return; // nothing left to check
+        }
+        // println!("next_ordering_i: {} ordering.len(): {}", next_ordering_i, ordering.len());
         chosen_perims[i] = perim_loc;
         // println!("Choose building loc: {}", perim_loc);
 
@@ -423,7 +433,7 @@ struct Agent {
     pose: (usize, usize, f32), // x, y, theta (rads)
     width: usize, // perpendicular to theta
     length: usize, // in direction of theta
-    speed: usize,
+    velocity: isize,
     health: i32,
     has_deadline: bool,
     deadline_reward: f32,
@@ -551,28 +561,6 @@ fn calc_total_perim(pts: &RectUsize) -> usize {
     let lines = points_to_lines_usize(pts);
     lines.into_iter().map(|a| dist_1(a)).sum()
 }
-
-// fn perim_i_to_pt(perim_i: usize, perims: &Vec<usize>, lines: &Vec<LineUsize>) -> (usize, usize) {
-//     let mut perim_val = perim_i;
-//     for i in 0..lines.len() {
-//         let line = lines[i];
-//         let perim = perims[i];
-//         if perim_val < perim {
-//             let ((x1, y1), (x2, y2)) = line;
-//             let sx = (x2 as i32 - x1 as i32).signum();
-//             let sy = (y2 as i32 - y1 as i32).signum();
-//             let pt = ((x1 as i32 + sx * perim_val as i32) as usize,
-//                       (y1 as i32 + sy * perim_val as i32) as usize);
-//             // include the boundary such that results look like they are from [min, max)
-//             // even when we actually iterate from high to low
-//             let pt = (pt.0 - if sx == -1 { 1 } else { 0 },
-//                       pt.1 - if sy == -1 { 1 } else { 0 });
-//             return pt;
-//         }
-//         perim_val -= perim;
-//     }
-//     panic!("Perim_i {} is invalid, exceeds perimeter total {}", perim_i, perims.iter().sum::<usize>());
-// }
 
 fn perim_i_to_pose(m: &WorldMap, perim_i: usize, perims: &Vec<usize>, lines: &Vec<LineUsize>,
                    size: (usize, usize), is_inner: bool) -> Option<(usize, usize, f32)> {
@@ -707,7 +695,7 @@ fn spawn_from_perim(m: &WorldMap, building: (usize, usize), building_margin: usi
     let dist = obj_dist_1((building.0, building.1, 0.0),
                           (BUILDING_WIDTH, BUILDING_WIDTH), pose, size);
 
-    println!("Chose perim_loc: {} at dist {} from building {:?}, with pose {:?}\n",
+    println!("Chose perim_loc: {} at dist {} from building {:?}, with pose {:?}",
              perim_loc, dist, building, pose);
 
     Some(pose)
@@ -781,7 +769,8 @@ fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
 
 // if there is an overlap returns the approximate perimeter location of the overlap.
 // as elsewhere, this goes through the perimeter clockwise top, right, bottom, left
-fn overlaps_path(agent: &Agent, path: &RectUsize, path_width: usize, is_inner: bool) -> Vec<usize> {
+fn overlaps_path(agent: &Agent, path: &RectUsize,
+                 path_width: usize, is_inner: bool) -> Vec<usize> {
     let path_width = path_width as f32;
 
     let (width, length) = (agent.width as f32, agent.length as f32);
@@ -866,7 +855,8 @@ fn mod_dist(a: usize, b: usize, n: usize) -> usize {
 }
 
 // assumes path is in order of top, right, bottom, left.
-fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize, path_width: usize, is_inner: bool) -> Vec<bool>
+fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize,
+                           path_width: usize, is_inner: bool) -> Vec<bool>
 {
     let path_lines = points_to_lines_usize(path);
     let perim_total = calc_total_perim(path);
@@ -1047,8 +1037,8 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
         let on_outer = calc_occupied_perim_map(agents, &m.pedestrian_outer_pts, path_width, false);
         let on_inner = calc_occupied_perim_map(agents, &m.pedestrian_inner_pts, path_width, true);
 
-        println!("On outer open: {:?}", on_outer.iter().filter(|&b| !b).count());
-        println!("On inner open: {:?}", on_inner.iter().filter(|&b| !b).count());
+        // println!("On outer open: {:?}", on_outer.iter().filter(|&b| !b).count());
+        // println!("On inner open: {:?}", on_inner.iter().filter(|&b| !b).count());
 
         let pose = spawn_on_two_perims(m, &m.buildings, BUILDING_PEDESTRIAN_MARGIN,
                                        (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
@@ -1057,7 +1047,7 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
 
         if let Some(pose) = pose {
             let mut agent = &mut agents.pedestrians[agent_i];
-            println!("Drew pose: {:?} and pedestrian: {:?}", pose, agent);
+            // println!("Drew pose: {:?} for pedestrian\n", pose);
             agent.on_map = true;
             agent.pose = pose;
             p_count += 1;
@@ -1083,8 +1073,8 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
         let on_outer = calc_occupied_perim_map(agents, &m.vehicle_outer_pts, path_width, false);
         let on_inner = calc_occupied_perim_map(agents, &m.vehicle_inner_pts, path_width, true);
 
-        println!("On outer: {:?}", on_outer.iter().filter(|&b| !b).count());
-        println!("On inner: {:?}", on_inner.iter().filter(|&b| !b).count());
+        // println!("On outer: {:?}", on_outer.iter().filter(|&b| !b).count());
+        // println!("On inner: {:?}", on_inner.iter().filter(|&b| !b).count());
 
         let pose = spawn_on_two_perims(m, &m.buildings, BUILDING_VEHICLE_MARGIN,
                                        (VEHICLE_WIDTH, VEHICLE_LENGTH),
@@ -1093,7 +1083,7 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
 
         if let Some(pose) = pose {
             let mut agent = &mut agents.vehicles[agent_i];
-            println!("Drew pose: {:?} and vehicle: {:?}", pose, agent);
+            // println!("Drew pose: {:?} for vehicle\n", pose);
             agent.on_map = true;
             agent.pose = pose;
             v_count += 1;
@@ -1104,7 +1094,6 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
         }
     }
 }
-
 
 fn create_agents() -> WorldAgents {
     let mut p = Agent{width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
@@ -1124,6 +1113,72 @@ fn create_agents() -> WorldAgents {
 fn setup_agents(map: &WorldMap, agents: &mut WorldAgents) {
     replenish_pedestrians(map, agents);
     replenish_vehicles(map, agents);
+}
+
+#[derive(Debug, Clone, Rand)]
+enum Action {
+    TurnLeft,
+    TurnRight,
+    AccelerateForward,
+    AccelerateBackward,
+    Brake,
+}
+
+fn choose_action(_map: &WorldMap, _agents: &WorldAgents, _agent: &Agent) -> Action {
+    // very simple right now
+    let mut rng = rand::thread_rng();
+    rng.gen()
+}
+
+fn apply_action(map: &WorldMap, agent: &mut Agent, action: Action) {
+    match action {
+        Action::TurnLeft => {
+            agent.pose.2 += consts::PI / 8.0;
+        },
+        Action::TurnRight => {
+            agent.pose.2 -= consts::PI / 8.0;
+        },
+        Action::AccelerateForward => {
+            agent.velocity = (agent.velocity + 1).min(3);
+        },
+        Action::AccelerateBackward => {
+            agent.velocity = (agent.velocity - 1).max(-3);
+        },
+        Action::Brake => {
+            if agent.velocity.abs() <= 2 {
+                agent.velocity = 0;
+            } else {
+                agent.velocity += if agent.velocity > 0 { -2 } else { 2 };
+            }
+        }
+    }
+    let (sin_t, cos_t) = agent.pose.2.sin_cos();
+
+    let new_x = agent.pose.0 as f32 + agent.velocity as f32 * sin_t;
+    let new_x = new_x.round().max(1.0).min(MAP_WIDTH as f32 - 1.0);
+    agent.pose.0 = new_x as usize;
+
+    let new_y = agent.pose.1 as f32 + agent.velocity as f32 * cos_t;
+    let new_y = new_y.round().max(1.0).min(MAP_HEIGHT as f32 - 1.0);
+    agent.pose.1 = new_y as usize;
+}
+
+fn update_agents(map: &WorldMap, all_agents: &mut WorldAgents, for_pedestrians: bool) {
+    let actions;
+    {
+        let agents = if for_pedestrians { &all_agents.pedestrians } else { &all_agents.vehicles };
+        actions = agents.iter().map(|a| choose_action(map, all_agents, a)).collect::<Vec<_>>();
+    }
+    let agents = if for_pedestrians { &mut all_agents.pedestrians } else
+                                    { &mut all_agents.vehicles };
+    for i in 0..actions.len() {
+        apply_action(map, &mut agents[i], actions[i].clone());
+    }
+}
+
+fn update_all_agents(map: &WorldMap, agents: &mut WorldAgents) {
+    update_agents(map, agents, true);
+    update_agents(map, agents, false);
 }
 
 #[get("/")]
@@ -1148,6 +1203,14 @@ fn main() {
     let mut agents = create_agents();
     setup_agents(&map, &mut agents);
     let state = WorldState {map, agents: Arc::new(Mutex::new(agents))};
+
+    let thread_state = state.clone();
+    thread::spawn(move || {
+		loop {
+			thread::sleep(std::time::Duration::from_millis(400));
+			update_all_agents(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
+		}
+	});
 
     rocket::ignite()
         .manage(state.clone())

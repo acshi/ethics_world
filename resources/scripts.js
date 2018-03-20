@@ -23,8 +23,8 @@ function update_grid() {
     ctx.fillRect(0, 0, document.grid_canvas.width, document.grid_canvas.height);
 
     update_color(ctx, document.grid, document.last_grid, 0, '#000000');
-    update_color(ctx, document.grid, document.last_grid, 1, '#ff0000');
-    update_color(ctx, document.grid, document.last_grid, 2, '#00ff00');
+    update_color(ctx, document.grid, document.last_grid, 1, '#6600ff');
+    update_color(ctx, document.grid, document.last_grid, 2, '#8866cc');
     // update_color(ctx, document.grid, document.last_grid, 3, '#ffff00');
     update_color(ctx, document.grid, document.last_grid, 4, '#0000ff');
     update_color(ctx, document.grid, document.last_grid, 8, '#ffffff');
@@ -107,7 +107,7 @@ function init() {
 
     update_grid();
     update();
-    // setInterval(update, 1000);
+    setInterval(update, 200);
 }
 
 document.render_map = render;
