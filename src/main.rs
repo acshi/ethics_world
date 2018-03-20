@@ -113,12 +113,13 @@ const CROSSWALK_WIDTH: usize = 2;
 const CROSSWALK_SPACING: usize = 6;
 const PEDESTRIAN_SIZE: usize = 1;
 const VEHICLE_WIDTH: usize = 4;
-const VEHICLE_LENGTH: usize = 11;
+const VEHICLE_LENGTH: usize = 10;
 const SIDEWALK_MIN_WIDTH: usize = 3;
 const SIDEWALK_MAX_WIDTH: usize = 6;
 const LANE_MIN_WIDTH: usize = 6;
 const LANE_MAX_WIDTH: usize = 10;
 
+const FROZEN_STEPS: usize = 6;
 const ATTEMPTS: usize = 100;
 
 // distance at which the pedestrian is considered adjacent to the building
@@ -427,9 +428,22 @@ fn create_map() -> WorldMap {
     map
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+enum AgentKind {
+    Obstacle,
+    Pedestrian,
+    Vehicle,
+}
+
+impl Default for AgentKind {
+    fn default() -> AgentKind { AgentKind::Obstacle }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Agent {
+    kind: AgentKind,
     on_map: bool,
+    frozen_steps: usize, // does not get an action for x steps... like after a collision
     pose: (usize, usize, f32), // x, y, theta (rads)
     width: usize, // perpendicular to theta
     length: usize, // in direction of theta
@@ -450,7 +464,8 @@ impl serde::Serialize for Agent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        let mut state = serializer.serialize_struct("Agent", 6)?;
+        let mut state = serializer.serialize_struct("Agent", 7)?;
+        state.serialize_field("kind", &self.kind)?;
         state.serialize_field("on_map", &self.on_map)?;
         state.serialize_field("x", &self.pose.0)?;
         state.serialize_field("y", &self.pose.1)?;
@@ -461,15 +476,9 @@ impl serde::Serialize for Agent {
     }
 }
 
-#[derive(Clone, Serialize)]
-struct WorldAgents {
-    pedestrians: Box<[Agent]>,
-    vehicles: Box<[Agent]>,
-}
-
 #[derive(Clone)]
 struct WorldState {
-    agents: Arc<Mutex<WorldAgents>>,
+    agents: Arc<Mutex<Vec<Agent>>>,
     map: WorldMap,
 }
 
@@ -741,7 +750,7 @@ fn rotate_pt(pt: (f32, f32), angle: f32) -> (f32, f32) {
 
 // project rectangle onto axis defined by angle and then return (min, max)
 fn project_rect(rect: &RectF32, angle: f32) -> (f32, f32) {
-    let projected = rect.iter().map(|p| rotate_pt(*p, angle).0).collect::<Vec<_>>();
+    let projected = rect.iter().map(|&p| rotate_pt(p, angle).0).collect::<Vec<_>>();
     (projected.iter().fold(f32::MAX, |a, &b| a.min(b)),
      projected.iter().fold(f32::MIN, |a, &b| a.max(b)))
 }
@@ -767,12 +776,7 @@ fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
     true
 }
 
-// if there is an overlap returns the approximate perimeter location of the overlap.
-// as elsewhere, this goes through the perimeter clockwise top, right, bottom, left
-fn overlaps_path(agent: &Agent, path: &RectUsize,
-                 path_width: usize, is_inner: bool) -> Vec<usize> {
-    let path_width = path_width as f32;
-
+fn agent_to_rect32(agent: &Agent) -> RectF32 {
     let (width, length) = (agent.width as f32, agent.length as f32);
     let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32, agent.pose.2);
     let rot_width = rotate_pt((width, 0.0), -theta);
@@ -781,9 +785,17 @@ fn overlaps_path(agent: &Agent, path: &RectUsize,
                       (x + rot_width.0, y + rot_width.1),
                       (x + rot_width.0 + rot_length.0, y + rot_width.1 + rot_length.1),
                       (x + rot_length.0, y + rot_length.1)];
+    agent_rect
+}
+
+// if there is an overlap returns the approximate perimeter location of the overlap.
+// as elsewhere, this goes through the perimeter clockwise top, right, bottom, left
+fn overlaps_path(agent: &Agent, path: &RectUsize,
+                 path_width: usize, is_inner: bool) -> Vec<usize> {
+    let path_width = path_width as f32;
+    let agent_rect = agent_to_rect32(agent);
 
     let mut overlap_locs = Vec::new();
-
     let path_lines = points_usize_to_lines_f32(path);
     // println!("len: {}", path_lines.len());
     let mut perim_loc = 0;
@@ -819,6 +831,7 @@ fn overlaps_path(agent: &Agent, path: &RectUsize,
         // println!("Path line rect {}: {:?}", i, line_rect);
         if overlaps_rect(&agent_rect, &line_rect) {
             // println!("Overlaps");
+            let (x, y) = (agent.pose.0 as f32, agent.pose.1 as f32);
             let perim_pos = if x1_eq_x2 { (y - y1).abs() } else { (x - x1).abs() };
             overlap_locs.push(perim_loc + perim_pos as usize);
         }
@@ -855,7 +868,7 @@ fn mod_dist(a: usize, b: usize, n: usize) -> usize {
 }
 
 // assumes path is in order of top, right, bottom, left.
-fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize,
+fn calc_occupied_perim_map(agents: &[Agent], path: &RectUsize,
                            path_width: usize, is_inner: bool) -> Vec<bool>
 {
     let path_lines = points_to_lines_usize(path);
@@ -908,7 +921,7 @@ fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize,
         }
     }
 
-    for agent in agents.pedestrians.iter().chain(agents.vehicles.iter()) {
+    for agent in agents {
         if !agent.on_map {
             continue;
         }
@@ -918,15 +931,7 @@ fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize,
             continue;
         }
 
-        let (width, length) = (agent.width as f32, agent.length as f32);
-        let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32, agent.pose.2);
-        let rot_width = rotate_pt((width, 0.0), -theta);
-        let rot_length = rotate_pt((0.0, length), -theta);
-        let agent_rect = [(x, y),
-                          (x + rot_width.0, y + rot_width.1),
-                          (x + rot_width.0 + rot_length.0, y + rot_width.1 + rot_length.1),
-                          (x + rot_length.0, y + rot_length.1)];
-
+        let agent_rect = agent_to_rect32(agent);
         // println!("Examining agent with rect: {:?}", agent_rect);
 
         // we only need to check along the path as far as this maximum dimension squared
@@ -962,11 +967,12 @@ fn calc_occupied_perim_map(agents: &WorldAgents, path: &RectUsize,
     occupied_perims
 }
 
-fn draw_off_map_agent_i(agents: &mut [Agent]) -> Option<usize> {
+fn draw_off_map_agent_i(agents: &[Agent], kind: AgentKind) -> Option<usize> {
     let mut rng = rand::thread_rng();
     let off_map_agents = agents.iter()
                                .enumerate()
-                               .filter_map(|(i, a)| if !a.on_map { Some(i) } else { None })
+                               .filter_map(|(i, a)|
+                                    if a.kind == kind && !a.on_map { Some(i) } else { None })
                                .collect::<Vec<_>>();
     if off_map_agents.len() == 0 {
         return None
@@ -1024,10 +1030,10 @@ fn setup_map_paths(m: &mut WorldMap) {
     }
 }
 
-fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
-    let mut p_count = agents.pedestrians.iter().filter(|p| p.on_map).count();
+fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
+    let mut p_count = agents.iter().filter(|p| p.kind == AgentKind::Pedestrian && p.on_map).count();
     while p_count < PEDESTRIAN_N {
-        let agent_i = draw_off_map_agent_i(&mut agents.pedestrians);
+        let agent_i = draw_off_map_agent_i(&agents, AgentKind::Pedestrian);
         if agent_i.is_none() {
             break; // no agents left to draw
         }
@@ -1046,7 +1052,7 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
                                        &on_outer, &on_inner, SPAWN_MARGIN);
 
         if let Some(pose) = pose {
-            let mut agent = &mut agents.pedestrians[agent_i];
+            let mut agent = &mut agents[agent_i];
             // println!("Drew pose: {:?} for pedestrian\n", pose);
             agent.on_map = true;
             agent.pose = pose;
@@ -1059,11 +1065,11 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut WorldAgents) {
     }
 }
 
-fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
-    let mut v_count = agents.vehicles.iter().filter(|p| p.on_map).count();
+fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
+    let mut v_count = agents.iter().filter(|p| p.kind == AgentKind::Vehicle && p.on_map).count();
 
     while v_count < VEHICLE_N {
-        let agent_i = draw_off_map_agent_i(&mut agents.vehicles);
+        let agent_i = draw_off_map_agent_i(&agents, AgentKind::Vehicle);
         if agent_i.is_none() {
             break; // no agents left to draw
         }
@@ -1082,7 +1088,7 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
                                        &on_outer, &on_inner, SPAWN_MARGIN);
 
         if let Some(pose) = pose {
-            let mut agent = &mut agents.vehicles[agent_i];
+            let mut agent = &mut agents[agent_i];
             // println!("Drew pose: {:?} for vehicle\n", pose);
             agent.on_map = true;
             agent.pose = pose;
@@ -1095,54 +1101,80 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut WorldAgents) {
     }
 }
 
-fn create_agents() -> WorldAgents {
-    let mut p = Agent{width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
+fn create_agents() -> Vec<Agent> {
+    let mut agents = Vec::new();
+    let mut p = Agent{kind: AgentKind::Pedestrian,
+                      width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
     p.folk_theory = 1.0;
+    for _ in 0..(POPULATION_N/2) {
+        agents.push(p.clone());
+    }
 
-    let mut v = Agent{width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
+    let mut v = Agent{kind: AgentKind::Vehicle,
+                      width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
     v.folk_theory = 1.0;
-
-    let pedestrians = [p; POPULATION_N/2];
-    let vehicles = [v; POPULATION_N/2];
-
-    let agents = WorldAgents { pedestrians: Box::new(pedestrians),
-                               vehicles: Box::new(vehicles) };
+    for _ in 0..(POPULATION_N/2) {
+        agents.push(v.clone());
+    }
     agents
 }
 
-fn setup_agents(map: &WorldMap, agents: &mut WorldAgents) {
+fn setup_agents(map: &WorldMap, agents: &mut [Agent]) {
     replenish_pedestrians(map, agents);
     replenish_vehicles(map, agents);
 }
 
-#[derive(Debug, Clone, Rand)]
+#[derive(Debug, Clone, Rand, PartialEq)]
 enum Action {
     TurnLeft,
     TurnRight,
     AccelerateForward,
     AccelerateBackward,
     Brake,
+    Nothing,
+    Frozen,
+    ExitMap,
 }
 
-fn choose_action(_map: &WorldMap, _agents: &WorldAgents, _agent: &Agent) -> Action {
+fn choose_action(_map: &WorldMap, _agents: &[Agent], agent: &Agent) -> Action {
     // very simple right now
+    if !agent.on_map || agent.kind == AgentKind::Obstacle {
+        return Action::Nothing;
+    }
+    if agent.frozen_steps > 0 {
+        return Action::Frozen;
+    }
     let mut rng = rand::thread_rng();
-    rng.gen()
+    let mut action = rng.gen();
+    while action == Action::Frozen || action == Action::ExitMap {
+        action = rng.gen();
+    }
+    action
 }
 
-fn apply_action(map: &WorldMap, agent: &mut Agent, action: Action) {
+fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
     match action {
         Action::TurnLeft => {
-            agent.pose.2 += consts::PI / 8.0;
+            let d_theta = consts::PI / 8.0;
+            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            agent.pose.2 += d_theta;
+            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            agent.pose.0 = (agent.pose.0 as f32 + rot_pt1.0 - rot_pt2.0).round().max(1.0) as usize;
+            agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1).round().max(1.0) as usize;
         },
         Action::TurnRight => {
-            agent.pose.2 -= consts::PI / 8.0;
+            let d_theta = -consts::PI / 8.0;
+            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            agent.pose.2 += d_theta;
+            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            agent.pose.0 = (agent.pose.0 as f32 + rot_pt1.0 - rot_pt2.0).round().max(1.0) as usize;
+            agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1).round().max(1.0) as usize;
         },
         Action::AccelerateForward => {
-            agent.velocity = (agent.velocity + 1).min(3);
+            // agent.velocity = (agent.velocity + 1).min(3);
         },
         Action::AccelerateBackward => {
-            agent.velocity = (agent.velocity - 1).max(-3);
+            // agent.velocity = (agent.velocity - 1).max(-3);
         },
         Action::Brake => {
             if agent.velocity.abs() <= 2 {
@@ -1150,6 +1182,20 @@ fn apply_action(map: &WorldMap, agent: &mut Agent, action: Action) {
             } else {
                 agent.velocity += if agent.velocity > 0 { -2 } else { 2 };
             }
+        },
+        Action::Nothing => {
+            return;
+        },
+        Action::Frozen => {
+            agent.frozen_steps -= 1;
+            if agent.frozen_steps == 0 {
+                agent.on_map = false;
+            }
+            return;
+        },
+        Action::ExitMap => {
+            agent.on_map = false;
+            return;
         }
     }
     let (sin_t, cos_t) = agent.pose.2.sin_cos();
@@ -1163,22 +1209,170 @@ fn apply_action(map: &WorldMap, agent: &mut Agent, action: Action) {
     agent.pose.1 = new_y as usize;
 }
 
-fn update_agents(map: &WorldMap, all_agents: &mut WorldAgents, for_pedestrians: bool) {
-    let actions;
-    {
-        let agents = if for_pedestrians { &all_agents.pedestrians } else { &all_agents.vehicles };
-        actions = agents.iter().map(|a| choose_action(map, all_agents, a)).collect::<Vec<_>>();
-    }
-    let agents = if for_pedestrians { &mut all_agents.pedestrians } else
-                                    { &mut all_agents.vehicles };
-    for i in 0..actions.len() {
-        apply_action(map, &mut agents[i], actions[i].clone());
+fn update_agents(map: &WorldMap, agents: &mut [Agent]) {
+    let mut actions = agents.iter().map(|a| choose_action(map, agents, a)).collect::<Vec<_>>();
+    for (i, action) in actions.drain(..).enumerate() {
+        apply_action(map, &mut agents[i], action);
     }
 }
 
-fn update_all_agents(map: &WorldMap, agents: &mut WorldAgents) {
-    update_agents(map, agents, true);
-    update_agents(map, agents, false);
+#[derive(Debug, Clone)]
+struct Collision {
+    agent1_i: usize,
+    agent2_i: usize,
+    damage1: i32,
+    damage2: i32,
+}
+
+type BoundingRect = ((usize, usize), (usize, usize));
+
+fn bounds_intersect(a: BoundingRect, b: BoundingRect) -> bool {
+    let ((lx1, ly1), (hx1, hy1)) = a;
+    let ((lx2, ly2), (hx2, hy2)) = b;
+    if lx1 < lx2 {
+        if hx1 < lx2 {
+            return false;
+        }
+    } else {
+        if hx2 < lx1 {
+            return false;
+        }
+    }
+    if ly1 < ly2 {
+        if hy1 < ly2 {
+            return false;
+        }
+    } else {
+        if hy2 < ly1 {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn get_velocity_vec(agent: &Agent) -> (f32, f32) {
+    let (sin_t, cos_t) = agent.pose.2.sin_cos();
+    (agent.velocity as f32 * sin_t, agent.velocity as f32 * cos_t)
+}
+
+fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
+    let mut collisions = Vec::new();
+
+    let bounding_rects = agents.iter().map(|a|
+                                        pose_size_to_bounding_rect(a.pose, (a.width, a.length)));
+    let bounding_rects = bounding_rects.collect::<Vec<_>>();
+    let agent_rects = agents.iter().map(|a| agent_to_rect32(a)).collect::<Vec<_>>();
+    for agent1_i in 0..(agents.len() - 1) {
+        let agent1 = agents[agent1_i];
+        if !agent1.on_map {
+            continue;
+        }
+
+        let bounds1 = bounding_rects[agent1_i];
+        for agent2_i in (agent1_i + 1)..agents.len() {
+            let agent2 = agents[agent2_i];
+            if !agent2.on_map {
+                continue;
+            }
+            if agent1.frozen_steps > 0 && agent2.frozen_steps > 0 {
+                // old collision
+                continue;
+            }
+
+            let bounds2 = bounding_rects[agent2_i];
+            // first perform lowest-res collision test
+            if !bounds_intersect(bounds1, bounds2) {
+                continue;
+            }
+
+            if !overlaps_rect(&agent_rects[agent1_i], &agent_rects[agent2_i]) {
+                continue;
+            }
+
+            // calculate severity of the collision based on the relative angle of the agents,
+            // penetration depth, relative velocity, and agent type... roughly!
+
+            let mut intensity = 0.0;
+            for &(agent_a_i, agent_b_i) in [(agent1_i, agent2_i), (agent2_i, agent1_i)].iter() {
+                let agent_a = agents[agent_a_i];
+                let agent_b = agents[agent_b_i];
+
+                // project velocities and rects onto agent a's direction of motion
+                let vel_a = get_velocity_vec(&agent_a);
+                let vel_b = get_velocity_vec(&agent_b);
+
+                let theta = agent_a.pose.2;
+
+                let v_a = rotate_pt(vel_a, -theta).0;
+                let v_b = rotate_pt(vel_b, -theta).0;
+
+                let rel_vel = v_a - v_b;
+
+                let (min_a, max_a) = project_rect(&agent_rects[agent_a_i], -theta);
+                let (min_b, max_b) = project_rect(&agent_rects[agent_b_i], -theta);
+                // how deeply is the front (or behind) of agent a into agent b?
+                let depth = if rel_vel > 0.0 {
+                    if max_a < max_b { max_a - min_b } else { 0.0 }
+                } else {
+                    if min_a > min_b { max_b - min_a } else { 0.0 }
+                };
+
+                intensity += depth * rel_vel;
+            }
+
+            if agent1.kind == AgentKind::Obstacle || agent2.kind == AgentKind::Obstacle {
+                intensity *= 2.0; // equal and opposite force exerted because of immovable obj.
+            }
+
+            let mut damage1 = intensity;
+            let mut damage2 = intensity;
+            if agent1.kind == AgentKind::Pedestrian && agent2.kind == AgentKind::Vehicle {
+                damage1 *= 4.0;
+            }
+            if agent2.kind == AgentKind::Pedestrian && agent1.kind == AgentKind::Vehicle {
+                damage2 *= 4.0;
+            }
+            if agent1.kind == AgentKind::Vehicle && agent2.kind == AgentKind::Vehicle {
+                damage1 *= 2.0;
+                damage2 *= 2.0;
+            }
+
+            let (damage1, damage2) = (damage1 as i32, damage2 as i32);
+            let collision = Collision{agent1_i, agent2_i, damage1, damage2};
+            println!("Collision! {:?}", collision);
+            collisions.push(collision);
+        }
+    }
+
+    collisions
+}
+
+fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
+    for collision in collisions.iter() {
+        {
+            let mut agent1 = &mut agents[collision.agent1_i];
+            if agent1.kind != AgentKind::Obstacle && agent1.frozen_steps == 0 {
+                agent1.health -= collision.damage1;
+                agent1.frozen_steps = FROZEN_STEPS;
+                agent1.velocity = 0;
+            }
+        }
+        let mut agent2 = &mut agents[collision.agent2_i];
+        if agent2.kind != AgentKind::Obstacle && agent2.frozen_steps == 0 {
+            agent2.health -= collision.damage2;
+            agent2.frozen_steps = FROZEN_STEPS;
+            agent2.velocity = 0;
+        }
+    }
+}
+
+fn run_timestep(map: &WorldMap, agents: &mut [Agent]) {
+    update_agents(map, agents);
+    let collisions = find_collisions(agents);
+    resolve_collisions(agents, &collisions);
+
+    replenish_pedestrians(map, agents);
+    replenish_vehicles(map, agents);
 }
 
 #[get("/")]
@@ -1208,7 +1402,7 @@ fn main() {
     thread::spawn(move || {
 		loop {
 			thread::sleep(std::time::Duration::from_millis(400));
-			update_all_agents(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
+			run_timestep(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
 		}
 	});
 

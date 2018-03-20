@@ -46,25 +46,10 @@ function render() {
 
     ctx.drawImage(document.grid_canvas, 0, 0);
 
-    ctx.fillStyle = "#ffff00";
-    for (var i = 0; i < document.agents.pedestrians.length; i++) {
-        var p = document.agents.pedestrians[i];
-        if (!p.on_map) {
-            continue;
-        }
-        ctx.translate(p.x * scale, p.y * scale)
-        ctx.rotate(-p.theta);
-        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
-        ctx.fillStyle = "#ee6600";
-        ctx.fillRect(0, 0, p.width * scale * 2 / 3, p.length * scale * 2 / 3);
-        ctx.fillStyle = "#ffff00";
-        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
-    }
-
     ctx.fillStyle = "#00ffff";
-    for (var i = 0; i < document.agents.vehicles.length; i++) {
-        var p = document.agents.vehicles[i];
-        if (!p.on_map) {
+    for (var i = 0; i < document.agents.length; i++) {
+        var p = document.agents[i];
+        if (p.kind != "Vehicle" || !p.on_map) {
             continue;
         }
         ctx.translate(p.x * scale, p.y * scale)
@@ -76,6 +61,21 @@ function render() {
         ctx.fillStyle = "#00ffff";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
     }
+
+    ctx.fillStyle = "#ffff00";
+    for (var i = 0; i < document.agents.length; i++) {
+        var p = document.agents[i];
+        if (p.kind != "Pedestrian" || !p.on_map) {
+            continue;
+        }
+        ctx.translate(p.x * scale, p.y * scale)
+        ctx.rotate(-p.theta);
+        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.fillStyle = "#ee6600";
+        ctx.fillRect(0, 0, p.width * scale * 2 / 3, p.length * scale * 2 / 3);
+        ctx.fillStyle = "#ffff00";
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
+    }
 }
 
 function update() {
@@ -83,10 +83,14 @@ function update() {
     r.open("GET", "/agents", true);
     r.onreadystatechange = function () {
         if (r.readyState != 4 || r.status != 200) {
+            if (r.readyState == 4) {
+                setTimeout(update, 200);
+            }
             return;
         }
         document.agents = JSON.parse(r.responseText);
         requestAnimationFrame(render);
+        setTimeout(update, 200);
     };
     r.send();
 }
@@ -107,7 +111,6 @@ function init() {
 
     update_grid();
     update();
-    setInterval(update, 200);
 }
 
 document.render_map = render;
