@@ -62,11 +62,14 @@ function render() {
         if (a.kind != "Vehicle" || !a.on_map) {
             continue;
         }
-        ctx.translate(a.x * scale, a.y * scale)
+
+        ctx.translate(a.x * scale, a.y * scale);
         ctx.rotate(-a.theta);
         ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#0088ff";
         ctx.fillRect(0, 0, scale, scale);
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 1;
         ctx.strokeRect(0, 0, a.width * scale, a.length * scale);
         // ctx.rotate(-Math.Pi / 3);
         ctx.font = "30px Arial";
@@ -74,6 +77,15 @@ function render() {
         ctx.fillText("" + a.health, 5, 5);
         ctx.fillStyle = "#00ffff";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
+
+        ctx.strokeStyle = "#55dd00";
+        ctx.beginPath();
+        ctx.moveTo(a.x * scale, a.y * scale);
+        var b = document.buildings[a.destination_building_i];
+        ctx.lineTo(b[0] * scale, b[1] * scale);
+        ctx.lineWidth = 2;
+        ctx.lineCap = "round";
+        ctx.stroke();
     }
 
     ctx.fillStyle = "#ffff00";
@@ -82,19 +94,29 @@ function render() {
         if (a.kind != "Pedestrian" || !a.on_map) {
             continue;
         }
-        ctx.translate(a.x * scale, a.y * scale)
+        ctx.translate(a.x * scale, a.y * scale);
         ctx.rotate(-a.theta);
         ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#ee6600";
         ctx.fillRect(0, 0, a.width * scale * 2 / 3, a.length * scale * 2 / 3);
         ctx.fillStyle = "#ffff00";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
+
+        ctx.strokeStyle = "#55dd00";
+        ctx.beginPath();
+        ctx.moveTo(a.x * scale, a.y * scale);
+        var b = document.buildings[a.destination_building_i];
+        ctx.lineTo(b[0] * scale, b[1] * scale);
+        ctx.lineWidth = 2;
+        ctx.lineCap = "round";
+        ctx.stroke();
     }
 }
 
 function update_stats() {
     document.getElementById("dead").innerHTML = "Deaths: <b>" + document.stats.dead + "</b>";
     document.getElementById("collisions").innerHTML = "Collisions: <b>" + document.stats.collisions + "</b>";
+    document.getElementById("trips_completed").innerHTML = "Trips Completed: <b>" + document.stats.trips_completed + "</b>";
 }
 
 function update() {

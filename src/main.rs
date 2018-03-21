@@ -446,11 +446,16 @@ struct Agent {
     kind: AgentKind,
     on_map: bool,
     frozen_steps: usize, // does not get an action for x steps... like after a collision
+
     pose: (usize, usize, f32), // x, y, theta (rads)
     width: usize, // perpendicular to theta
     length: usize, // in direction of theta
     velocity: isize,
     health: i32,
+
+    source_building_i: usize,
+    destination_building_i: usize,
+
     has_deadline: bool,
     deadline_reward: f32,
     timestep_cost: f32,
@@ -466,7 +471,7 @@ impl serde::Serialize for Agent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        let mut state = serializer.serialize_struct("Agent", 8)?;
+        let mut state = serializer.serialize_struct("Agent", 9)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("on_map", &self.on_map)?;
         state.serialize_field("x", &self.pose.0)?;
@@ -475,6 +480,7 @@ impl serde::Serialize for Agent {
         state.serialize_field("width", &self.width)?;
         state.serialize_field("length", &self.length)?;
         state.serialize_field("health", &self.health)?;
+        state.serialize_field("destination_building_i", &self.destination_building_i)?;
         state.end()
     }
 }
@@ -483,6 +489,7 @@ impl serde::Serialize for Agent {
 struct WorldStats {
     collisions: usize,
     dead: usize,
+    trips_completed: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -722,11 +729,12 @@ fn spawn_from_perim(m: &WorldMap, building: (usize, usize), building_margin: usi
 // tries to find a "spawn" pose (x, y, theta) for agent with size (width, length)
 // within building_margin of a building along one of the two perimeters,
 // margin away from all existing agents
+// returns (pose, building_i)
 fn spawn_on_two_perims(m: &WorldMap, buildings: &[(usize, usize)], building_margin: usize,
                        size: (usize, usize),
                        pts_a: &RectUsize, pts_b: &RectUsize,
                        occupied_a: &Vec<bool>, occupied_b: &Vec<bool>,
-                       margin: usize) -> Option<(usize, usize, f32)> {
+                       margin: usize) -> Option<((usize, usize, f32), usize)> {
     let mut rng = rand::thread_rng();
 
     let mut ordering = (0..buildings.len()).collect::<Vec<_>>();
@@ -741,7 +749,7 @@ fn spawn_on_two_perims(m: &WorldMap, buildings: &[(usize, usize)], building_marg
                                    pts_b, occupied_b, margin, true);
         }
         if res.is_some() {
-            return res;
+            return Some((res.unwrap(), i));
         }
     }
     None
@@ -1040,6 +1048,8 @@ fn setup_map_paths(m: &mut WorldMap) {
 }
 
 fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
+    let mut rng = rand::thread_rng();
+
     let mut p_count = agents.iter().filter(|p|
                                             p.kind == AgentKind::Pedestrian && p.on_map).count();
     while p_count < PEDESTRIAN_N {
@@ -1056,16 +1066,21 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
         // println!("On outer open: {:?}", on_outer.iter().filter(|&b| !b).count());
         // println!("On inner open: {:?}", on_inner.iter().filter(|&b| !b).count());
 
-        let pose = spawn_on_two_perims(m, &m.buildings, BUILDING_PEDESTRIAN_MARGIN,
-                                       (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
-                                       &m.pedestrian_outer_pts, &m.pedestrian_inner_pts,
-                                       &on_outer, &on_inner, SPAWN_MARGIN);
+        let spawn_result = spawn_on_two_perims(m, &m.buildings, BUILDING_PEDESTRIAN_MARGIN,
+                                               (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
+                                               &m.pedestrian_outer_pts, &m.pedestrian_inner_pts,
+                                               &on_outer, &on_inner, SPAWN_MARGIN);
 
-        if let Some(pose) = pose {
+        if let Some((pose, building_i)) = spawn_result {
             let mut agent = &mut agents[agent_i];
             // println!("Drew pose: {:?} for pedestrian\n", pose);
             agent.on_map = true;
             agent.pose = pose;
+            agent.source_building_i = building_i;
+            agent.destination_building_i = building_i;
+            while agent.destination_building_i == building_i {
+                agent.destination_building_i = rng.gen_range(0, m.buildings.len());
+            }
             p_count += 1;
         } else {
             // no locations are open even though we want to spawn another agent.
@@ -1076,6 +1091,8 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
 }
 
 fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
+    let mut rng = rand::thread_rng();
+
     let mut v_count = agents.iter().filter(|p| p.kind == AgentKind::Vehicle && p.on_map).count();
 
     while v_count < VEHICLE_N {
@@ -1092,16 +1109,21 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
         // println!("On outer: {:?}", on_outer.iter().filter(|&b| !b).count());
         // println!("On inner: {:?}", on_inner.iter().filter(|&b| !b).count());
 
-        let pose = spawn_on_two_perims(m, &m.buildings, BUILDING_VEHICLE_MARGIN,
-                                       (VEHICLE_WIDTH, VEHICLE_LENGTH),
-                                       &m.vehicle_outer_pts, &m.vehicle_inner_pts,
-                                       &on_outer, &on_inner, SPAWN_MARGIN);
+        let spawn_result = spawn_on_two_perims(m, &m.buildings, BUILDING_VEHICLE_MARGIN,
+                                               (VEHICLE_WIDTH, VEHICLE_LENGTH),
+                                               &m.vehicle_outer_pts, &m.vehicle_inner_pts,
+                                               &on_outer, &on_inner, SPAWN_MARGIN);
 
-        if let Some(pose) = pose {
+        if let Some((pose, building_i)) = spawn_result {
             let mut agent = &mut agents[agent_i];
             // println!("Drew pose: {:?} for vehicle\n", pose);
             agent.on_map = true;
             agent.pose = pose;
+            agent.source_building_i = building_i;
+            agent.destination_building_i = building_i;
+            while agent.destination_building_i == building_i {
+                agent.destination_building_i = rng.gen_range(0, m.buildings.len());
+            }
             v_count += 1;
         } else {
             // no locations are open even though we want to spawn another agent.
@@ -1425,9 +1447,9 @@ fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
     }
 }
 
-fn evolve_new_agent(agents: &[Agent]) -> Agent {
+fn evolve_new_agent(agents: &[Agent], kind: AgentKind) -> Agent {
     let alive = agents.iter().filter(|a| a.health > 0 &&
-                                         a.kind != AgentKind::Obstacle).collect::<Vec<_>>();
+                                         a.kind == kind).collect::<Vec<_>>();
     let mut rng = rand::thread_rng();
     let mut new_agent = **rng.choose(&alive).unwrap();
     new_agent.health = 99;
@@ -1441,11 +1463,33 @@ fn replace_dead_agents(agents: &mut [Agent]) -> usize {
     // replace agents that have died
     for i in 0..agents.len() {
         if !agents[i].on_map && agents[i].health == 0 {
-            agents[i] = evolve_new_agent(agents);
+            agents[i] = evolve_new_agent(agents, agents[i].kind);
             replaced += 1;
         }
     }
     replaced
+}
+
+// returns the number of newly completed trips
+fn evaluate_trips(map: &WorldMap, agents: &mut [Agent]) -> usize {
+    let mut trips_completed = 0;
+
+    for agent in agents.iter_mut() {
+        if !agent.on_map || agent.frozen_steps > 0 || agent.kind == AgentKind::Obstacle {
+            continue;
+        }
+        let building = map.buildings[agent.destination_building_i];
+        let dist = obj_dist_1((building.0, building.1, 0.0), (BUILDING_WIDTH, BUILDING_WIDTH),
+                              agent.pose, (agent.width, agent.length));
+        let building_margin = if agent.kind == AgentKind::Pedestrian
+                                { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
+        if dist <= building_margin {
+            agent.on_map = false;
+            trips_completed += 1;
+        }
+    }
+
+    trips_completed
 }
 
 fn run_timestep(map: &WorldMap, agents: &mut [Agent], stats: &mut WorldStats) {
@@ -1453,6 +1497,9 @@ fn run_timestep(map: &WorldMap, agents: &mut [Agent], stats: &mut WorldStats) {
     let collisions = find_collisions(agents);
     resolve_collisions(agents, &collisions);
     stats.collisions += collisions.len();
+
+    let trips_completed = evaluate_trips(map, agents);
+    stats.trips_completed += trips_completed;
 
     let replaced = replace_dead_agents(agents);
     stats.dead += replaced;
