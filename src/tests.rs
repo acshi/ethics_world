@@ -20,11 +20,57 @@ impl Hash for Pose {
 }
 
 #[test]
+fn test_simple_collision_detection() {
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (14, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 0);
+
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (13, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 1);
+
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (6, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 0);
+
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (7, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 1);
+
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (10, 20, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 0);
+
+    let agents = [Agent{pose: (10, 10, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (10, 19, 0.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 1);
+}
+
+#[test]
+fn test_rotation_collision_detection() {
+    let agents = [Agent{pose: (43, 37, consts::PI / 8.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (48, 48, consts::PI / 8.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 0);
+
+    let agents = [Agent{pose: (43, 37, consts::PI / 8.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (47, 46, -consts::PI / 4.0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 1);
+}
+
+#[test]
 fn test_initially_unoccupied() {
     let mut map = create_map();
     setup_map_paths(&mut map);
 
-    let agents = create_agents();
+    let agents = create_agents(&map);
 
     let path_width = map.vert_sidewalk_width.max(map.horiz_sidewalk_width);
     let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, path_width, false);
@@ -42,15 +88,15 @@ fn test_spawning_unique() {
         let mut map = create_map();
         setup_map_paths(&mut map);
 
-        let mut agents = create_agents();
+        let mut agents = create_agents(&map);
         setup_agents(&map, &mut agents);
 
-        let all_agents = agents.pedestrians.iter().chain(agents.vehicles.iter()).filter(|a| a.on_map);
-        let mut all_poses = all_agents.map(|a| Pose{x: a.pose.0, y: a.pose.1, theta: a.pose.2}).collect::<Vec<_>>();
-        let all_pose_len = all_poses.len();
+        let mut all_poses = agents.iter().filter(|a| a.on_map && a.kind != AgentKind::Obstacle)
+                                  .map(|a| Pose{x: a.pose.0, y: a.pose.1, theta: a.pose.2}).collect::<Vec<_>>();
+        let all_poses_len = all_poses.len();
         let set_poses = all_poses.drain(..).collect::<HashSet<_>>(); // remove duplicate values
 
-        assert_eq!(all_pose_len, set_poses.len());
+        assert_eq!(all_poses_len, set_poses.len());
     }
 }
 
@@ -61,9 +107,9 @@ fn test_spawn_pedestrian() {
 
         let mut map = create_map();
         setup_map_paths(&mut map);
-        let mut agents = create_agents();
+        let mut agents = create_agents(&map);
 
-        let agent_i = draw_off_map_agent_i(&mut agents.pedestrians);
+        let agent_i = draw_off_map_agent_i(&mut agents, AgentKind::Pedestrian);
         if agent_i.is_none() {
             continue; // no agents left to draw
         }
@@ -79,9 +125,10 @@ fn test_spawn_pedestrian() {
                                        &on_outer, &on_inner, SPAWN_MARGIN);
 
         println!("Inner points: {:?}", map.pedestrian_inner_pts);
+        println!("Outer points: {:?}", map.pedestrian_outer_pts);
 
         if let Some(pose) = pose {
-            let mut agent = &mut agents.pedestrians[agent_i];
+            let mut agent = &mut agents[agent_i];
             println!("Drew pose: {:?} and pedestrian: {:?}", pose, agent);
             agent.on_map = true;
             agent.pose = pose;
@@ -122,23 +169,25 @@ fn test_spawn_pedestrian() {
 
         // can only be on one of the two lanes/paths
         assert!(occ_count_inner == 0 || occ_count_outer == 0);
-        assert_eq!(occ_count_outer + occ_count_inner, PEDESTRIAN_SIZE);
+        let total_count = occ_count_inner + occ_count_outer;
+        // will be one extra when the pedestrian is right on the corner of the perimeter
+        assert!(total_count == PEDESTRIAN_SIZE || total_count == PEDESTRIAN_SIZE + 1);
     }
 }
 
 #[test]
 fn test_spawn_vehicle() {
-    for i in 0..4 {
+    for i in 0..10 {
         println!("\nAttempt #: {}", i);
 
         let mut map = create_map();
         setup_map_paths(&mut map);
-        let mut agents = create_agents();
+        let mut agents = create_agents(&map);
 
         // replenish_pedestrians(&map, &mut agents);
 
         for _ in 0..VEHICLE_N {
-            let agent_i = draw_off_map_agent_i(&mut agents.vehicles);
+            let agent_i = draw_off_map_agent_i(&mut agents, AgentKind::Pedestrian);
             if agent_i.is_none() {
                 continue; // no agents left to draw
             }
@@ -156,12 +205,12 @@ fn test_spawn_vehicle() {
 
             if let Some(pose) = pose {
                 // can only be on one of the two lanes/paths
-                for agent in agents.vehicles.iter() {
+                for agent in agents.iter() {
                     assert_ne!(Pose{x: agent.pose.0, y: agent.pose.1, theta: agent.pose.2},
                                Pose{x: pose.0, y: pose.1, theta: pose.2});
                 }
 
-                let mut agent = &mut agents.vehicles[agent_i];
+                let mut agent = &mut agents[agent_i];
                 println!("Drew pose: {:?} and vehicle: {:?}", pose, agent);
                 agent.on_map = true;
                 agent.pose = pose;

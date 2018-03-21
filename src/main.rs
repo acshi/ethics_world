@@ -96,14 +96,14 @@ mod tests;
 //     println!("Falied to find solution after expanding {} nodes", p.get_expansion_count())
 // }
 
-const MAP_WIDTH: usize = 70;
-const MAP_HEIGHT: usize = 70;
+const MAP_WIDTH: usize = 74;
+const MAP_HEIGHT: usize = 74;
 const MAP_SIZE: usize = MAP_WIDTH * MAP_HEIGHT;
 const BUILDING_N: usize = 30;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: usize = 6;
 const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
-const PEDESTRIAN_N: usize = 10; // those on map at one time
+const PEDESTRIAN_N: usize = 6; // those on map at one time
 const VEHICLE_N: usize = 6;
 const SPAWN_MARGIN: usize = 3; // clearance from other agents when spawning
 
@@ -527,16 +527,13 @@ fn pose_size_to_bounding_rect(p: (usize, usize, f32), size: (usize, usize))
     let (sx, sy) = size;
 
     let rw = rotate_pt((sx as f32, 0.0), -t);
-    let rw = (rw.0 as i32, rw.1 as i32);
     let rl = rotate_pt((0.0, sy as f32), -t);
-    let rl = (rl.0 as i32, rl.1 as i32);
+    let (x, y) = (x as f32, y as f32);
 
-    let (x, y) = (x as i32, y as i32);
-
-    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).max(0) as usize;
-    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).max(0) as usize;
-    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).max(0) as usize;
-    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).max(0) as usize;
+    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).floor().max(0.0) as usize;
+    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).floor().max(0.0) as usize;
+    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).ceil().max(0.0) as usize;
+    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).ceil().max(0.0) as usize;
 
     ((min_x, min_y), (max_x, max_y))
 }
@@ -765,8 +762,8 @@ fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
     let normals2 = lines_to_normals(&q2_lines);
     let normals = normals1.into_iter().chain(normals2.into_iter()).collect::<Vec<_>>();
     for normal in normals {
-        let (min1, max1) = project_rect(q1, normal);
-        let (min2, max2) = project_rect(q2, normal);
+        let (min1, max1) = project_rect(q1, -normal);
+        let (min2, max2) = project_rect(q2, -normal);
         // include epsilon value for rounding/imprecision error.
         // so that adjacent things are not considered overlapping
         if max1 <= (min2 + 1e-4) || max2 <= (min1 + 1e-4) {
@@ -1230,6 +1227,7 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
         Action::Frozen => {
             agent.frozen_steps -= 1;
             if agent.frozen_steps == 0 {
+                // agent.frozen_steps = 1;
                 agent.on_map = false;
             }
             return;
@@ -1315,7 +1313,8 @@ fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
             if !agent2.on_map {
                 continue;
             }
-            if agent1.frozen_steps > 0 && agent2.frozen_steps > 0 {
+            if (agent1.frozen_steps > 0 || agent1.kind == AgentKind::Obstacle) &&
+               (agent2.frozen_steps > 0 || agent2.kind == AgentKind::Obstacle) {
                 // old collision
                 continue;
             }
