@@ -13,11 +13,21 @@ function update_color(ctx, grid, last_grid, value, color) {
 }
 
 function update_grid() {
-    console.log("update grid");
     var ctx = document.grid_ctx;
-    if (document.last_grid == document.grid) {
-        return;
+    if (document.last_grid.length == document.grid.length) {
+        var grids_equal = true;
+        for (var i = 0; i < document.grid.length; i++) {
+            if (document.last_grid[i] != document.grid[i]) {
+                grids_equal = false;
+                break;
+            }
+        }
+        if (grids_equal) {
+            return;
+        }
     }
+
+    console.log("update grid");
 
     ctx.fillStyle = "#888888";
     ctx.fillRect(0, 0, document.grid_canvas.width, document.grid_canvas.height);
@@ -82,9 +92,14 @@ function render() {
     }
 }
 
+function update_stats() {
+    document.getElementById("dead").innerHTML = "Deaths: <b>" + document.stats.dead + "</b>";
+    document.getElementById("collisions").innerHTML = "Collisions: <b>" + document.stats.collisions + "</b>";
+}
+
 function update() {
     var r = new XMLHttpRequest();
-    r.open("GET", "/agents", true);
+    r.open("GET", "/update", true);
     r.onreadystatechange = function () {
         if (r.readyState != 4 || r.status != 200) {
             if (r.readyState == 4) {
@@ -92,7 +107,18 @@ function update() {
             }
             return;
         }
-        document.agents = JSON.parse(r.responseText);
+        var results = JSON.parse(r.responseText);
+        document.agents = results.agents;
+        document.grid = results.map;
+        document.stats = results.stats;
+
+        document.grid = results.map.grid;
+        document.buildings = results.map.buildings;
+        document.grid_width = results.map.grid_width;
+        document.grid_height = document.grid.length / document.grid_width;
+        update_grid();
+        update_stats();
+
         requestAnimationFrame(render);
         setTimeout(update, 200);
     };

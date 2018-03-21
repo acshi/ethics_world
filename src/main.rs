@@ -25,7 +25,8 @@ use serde::ser::SerializeStruct;
 
 mod general_search;
 #[allow(unused_imports)]
-use general_search::{PriorityQueue, SearchProblemTrait, SearchNode, create_search_problem, tree_search};
+use general_search::{PriorityQueue, SearchProblemTrait, SearchNode,
+                     create_search_problem, tree_search};
 
 #[cfg(test)]
 mod tests;
@@ -372,7 +373,8 @@ fn create_map() -> WorldMap {
 
     println!("\nhoriz length: {} vert length: {}", horiz_road_length, vert_road_length);
     println!("horiz width: {} vert width: {}", horiz_road_width, vert_road_width);
-    println!("horiz sidewalk width: {} vert sidewalk width: {}", horiz_sidewalk_width, vert_sidewalk_width);
+    println!("horiz sidewalk width: {} vert sidewalk width: {}",
+              horiz_sidewalk_width, vert_sidewalk_width);
 
     let mut map = WorldMap{grid: Box::new(grid), buildings, grid_width: MAP_WIDTH,
                              horiz_road_width, vert_road_width,
@@ -477,11 +479,20 @@ impl serde::Serialize for Agent {
     }
 }
 
-#[derive(Clone)]
-struct WorldState {
-    agents: Arc<Mutex<Vec<Agent>>>,
-    map: WorldMap,
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct WorldStats {
+    collisions: usize,
+    dead: usize,
 }
+
+#[derive(Clone, Serialize)]
+struct WorldStateInner {
+    map: WorldMap,
+    agents: Vec<Agent>,
+    stats: WorldStats,
+}
+
+type WorldState = Arc<Mutex<WorldStateInner>>;
 
 type LineUsize = ((usize, usize), (usize, usize));
 type LineF32 = ((f32, f32), (f32, f32));
@@ -1029,7 +1040,8 @@ fn setup_map_paths(m: &mut WorldMap) {
 }
 
 fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
-    let mut p_count = agents.iter().filter(|p| p.kind == AgentKind::Pedestrian && p.on_map).count();
+    let mut p_count = agents.iter().filter(|p|
+                                            p.kind == AgentKind::Pedestrian && p.on_map).count();
     while p_count < PEDESTRIAN_N {
         let agent_i = draw_off_map_agent_i(&agents, AgentKind::Pedestrian);
         if agent_i.is_none() {
@@ -1194,17 +1206,21 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
     match action {
         Action::TurnLeft => {
             let d_theta = consts::PI / 8.0;
-            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0,
+                                     agent.length as f32 / 2.0), -agent.pose.2);
             agent.pose.2 += d_theta;
-            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0,
+                                     agent.length as f32 / 2.0), -agent.pose.2);
             agent.pose.0 = (agent.pose.0 as f32 + rot_pt1.0 - rot_pt2.0).round().max(1.0) as usize;
             agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1).round().max(1.0) as usize;
         },
         Action::TurnRight => {
             let d_theta = -consts::PI / 8.0;
-            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            let rot_pt1 = rotate_pt((agent.width as f32 / 2.0,
+                                     agent.length as f32 / 2.0), -agent.pose.2);
             agent.pose.2 += d_theta;
-            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0, agent.length as f32 / 2.0), -agent.pose.2);
+            let rot_pt2 = rotate_pt((agent.width as f32 / 2.0,
+                                     agent.length as f32 / 2.0), -agent.pose.2);
             agent.pose.0 = (agent.pose.0 as f32 + rot_pt1.0 - rot_pt2.0).round().max(1.0) as usize;
             agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1).round().max(1.0) as usize;
         },
@@ -1409,10 +1425,37 @@ fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
     }
 }
 
-fn run_timestep(map: &WorldMap, agents: &mut [Agent]) {
+fn evolve_new_agent(agents: &[Agent]) -> Agent {
+    let alive = agents.iter().filter(|a| a.health > 0 &&
+                                         a.kind != AgentKind::Obstacle).collect::<Vec<_>>();
+    let mut rng = rand::thread_rng();
+    let mut new_agent = **rng.choose(&alive).unwrap();
+    new_agent.health = 99;
+    new_agent.on_map = false;
+    new_agent
+}
+
+// returns number of agents replaced
+fn replace_dead_agents(agents: &mut [Agent]) -> usize {
+    let mut replaced = 0;
+    // replace agents that have died
+    for i in 0..agents.len() {
+        if !agents[i].on_map && agents[i].health == 0 {
+            agents[i] = evolve_new_agent(agents);
+            replaced += 1;
+        }
+    }
+    replaced
+}
+
+fn run_timestep(map: &WorldMap, agents: &mut [Agent], stats: &mut WorldStats) {
     update_agents(map, agents);
     let collisions = find_collisions(agents);
     resolve_collisions(agents, &collisions);
+    stats.collisions += collisions.len();
+
+    let replaced = replace_dead_agents(agents);
+    stats.dead += replaced;
 
     replenish_pedestrians(map, agents);
     replenish_vehicles(map, agents);
@@ -1420,12 +1463,12 @@ fn run_timestep(map: &WorldMap, agents: &mut [Agent]) {
 
 #[get("/")]
 fn index(state: State<WorldState>) -> Template {
-    Template::render("index", &state.map)
+    Template::render("index", &state.lock().unwrap().map)
 }
 
-#[get("/agents")]
-fn get_agents(state: State<WorldState>) -> Json<Value> {
-    Json(json!(&*state.agents.lock().unwrap()))
+#[get("/update")]
+fn get_update(state: State<WorldState>) -> Json<Value> {
+    Json(json!(&*state.lock().unwrap()))
 }
 
 #[get("/resources/<file..>")]
@@ -1439,19 +1482,23 @@ fn main() {
 
     let mut agents = create_agents(&map);
     setup_agents(&map, &mut agents);
-    let state = WorldState {map, agents: Arc::new(Mutex::new(agents))};
+
+    let state = WorldStateInner {map, agents: agents,
+                                      stats: WorldStats::default()};
+    let state = Arc::new(Mutex::new(state));
 
     let thread_state = state.clone();
     thread::spawn(move || {
         loop {
             thread::sleep(std::time::Duration::from_millis(100));
-            run_timestep(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
+            let thread_state = &mut *thread_state.lock().unwrap();
+            run_timestep(&thread_state.map, &mut thread_state.agents, &mut thread_state.stats);
         }
     });
 
     rocket::ignite()
         .manage(state.clone())
-        .mount("/", routes![index, get_agents, resources])
+        .mount("/", routes![index, get_update, resources])
         .attach(Template::fairing())
         .launch();
 }

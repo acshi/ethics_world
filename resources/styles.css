@@ -1,0 +1,13 @@
+ section {
+     display: flex;
+     flex-direction: row;
+ }
+
+ #labels {
+     margin-left: 2em;
+ }
+
+#dead, #collisions {
+    font-size: 2em;
+    margin-bottom: 1em;
+}
