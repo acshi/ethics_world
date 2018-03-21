@@ -48,31 +48,35 @@ function render() {
 
     ctx.fillStyle = "#00ffff";
     for (var i = 0; i < document.agents.length; i++) {
-        var p = document.agents[i];
-        if (p.kind != "Vehicle" || !p.on_map) {
+        var a = document.agents[i];
+        if (a.kind != "Vehicle" || !a.on_map) {
             continue;
         }
-        ctx.translate(p.x * scale, p.y * scale)
-        ctx.rotate(-p.theta);
-        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.translate(a.x * scale, a.y * scale)
+        ctx.rotate(-a.theta);
+        ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#0088ff";
         ctx.fillRect(0, 0, scale, scale);
-        ctx.strokeRect(0, 0, p.width * scale, p.length * scale);
+        ctx.strokeRect(0, 0, a.width * scale, a.length * scale);
+        // ctx.rotate(-Math.Pi / 3);
+        ctx.font = "30px Arial";
+        ctx.textBaseline = "top";
+        ctx.fillText("" + a.health, 5, 5);
         ctx.fillStyle = "#00ffff";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
     }
 
     ctx.fillStyle = "#ffff00";
     for (var i = 0; i < document.agents.length; i++) {
-        var p = document.agents[i];
-        if (p.kind != "Pedestrian" || !p.on_map) {
+        var a = document.agents[i];
+        if (a.kind != "Pedestrian" || !a.on_map) {
             continue;
         }
-        ctx.translate(p.x * scale, p.y * scale)
-        ctx.rotate(-p.theta);
-        ctx.fillRect(0, 0, p.width * scale, p.length * scale);
+        ctx.translate(a.x * scale, a.y * scale)
+        ctx.rotate(-a.theta);
+        ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#ee6600";
-        ctx.fillRect(0, 0, p.width * scale * 2 / 3, p.length * scale * 2 / 3);
+        ctx.fillRect(0, 0, a.width * scale * 2 / 3, a.length * scale * 2 / 3);
         ctx.fillStyle = "#ffff00";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
     }
@@ -84,7 +88,7 @@ function update() {
     r.onreadystatechange = function () {
         if (r.readyState != 4 || r.status != 200) {
             if (r.readyState == 4) {
-                setTimeout(update, 200);
+                setTimeout(update, 100);
             }
             return;
         }

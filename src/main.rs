@@ -103,8 +103,8 @@ const BUILDING_N: usize = 30;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: usize = 6;
 const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
-const PEDESTRIAN_N: usize = 24; // those on map at one time
-const VEHICLE_N: usize = 12;
+const PEDESTRIAN_N: usize = 10; // those on map at one time
+const VEHICLE_N: usize = 6;
 const SPAWN_MARGIN: usize = 3; // clearance from other agents when spawning
 
 const BUILDING_WIDTH: usize = 3; // just a facade
@@ -116,8 +116,8 @@ const VEHICLE_WIDTH: usize = 4;
 const VEHICLE_LENGTH: usize = 10;
 const SIDEWALK_MIN_WIDTH: usize = 3;
 const SIDEWALK_MAX_WIDTH: usize = 6;
-const LANE_MIN_WIDTH: usize = 6;
-const LANE_MAX_WIDTH: usize = 10;
+const LANE_MIN_WIDTH: usize = 7;
+const LANE_MAX_WIDTH: usize = 11;
 
 const FROZEN_STEPS: usize = 6;
 const ATTEMPTS: usize = 100;
@@ -464,7 +464,7 @@ impl serde::Serialize for Agent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        let mut state = serializer.serialize_struct("Agent", 7)?;
+        let mut state = serializer.serialize_struct("Agent", 8)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("on_map", &self.on_map)?;
         state.serialize_field("x", &self.pose.0)?;
@@ -472,6 +472,7 @@ impl serde::Serialize for Agent {
         state.serialize_field("theta", &self.pose.2)?;
         state.serialize_field("width", &self.width)?;
         state.serialize_field("length", &self.length)?;
+        state.serialize_field("health", &self.health)?;
         state.end()
     }
 }
@@ -1101,21 +1102,61 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
     }
 }
 
-fn create_agents() -> Vec<Agent> {
+fn create_agents(map: &WorldMap) -> Vec<Agent> {
     let mut agents = Vec::new();
     let mut p = Agent{kind: AgentKind::Pedestrian,
-                      width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE, ..Agent::default()};
+                      width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE,
+                      health: 99,
+                      ..Agent::default()};
     p.folk_theory = 1.0;
     for _ in 0..(POPULATION_N/2) {
         agents.push(p.clone());
     }
 
     let mut v = Agent{kind: AgentKind::Vehicle,
-                      width: VEHICLE_WIDTH, length: VEHICLE_LENGTH, ..Agent::default()};
+                      width: VEHICLE_WIDTH, length: VEHICLE_LENGTH,
+                      health: 99,
+                      ..Agent::default()};
     v.folk_theory = 1.0;
     for _ in 0..(POPULATION_N/2) {
         agents.push(v.clone());
     }
+
+    // add buildings
+    let b = Agent{kind: AgentKind::Obstacle, on_map: true,
+                  width: BUILDING_WIDTH, length: BUILDING_WIDTH,
+                  ..Agent::default()};
+    for building in &map.buildings {
+        let mut b_agent = b.clone();
+        b_agent.pose = (building.0, building.1, 0.0);
+        agents.push(b_agent);
+    }
+
+    // edges of the map; top, right, bottom, left
+    let edge = Agent{kind: AgentKind::Obstacle, on_map: true,
+                     width: MAP_WIDTH, length: 1,
+                     pose: (0, 0, 0.0),
+                     ..Agent::default()};
+    agents.push(edge);
+
+    let edge = Agent{kind: AgentKind::Obstacle, on_map: true,
+                     width: 1, length: MAP_HEIGHT,
+                     pose: (MAP_WIDTH - 1, 0, 0.0),
+                     ..Agent::default()};
+    agents.push(edge);
+
+    let edge = Agent{kind: AgentKind::Obstacle, on_map: true,
+                     width: MAP_WIDTH, length: 1,
+                     pose: (0, MAP_HEIGHT - 1, 0.0),
+                     ..Agent::default()};
+    agents.push(edge);
+
+    let edge = Agent{kind: AgentKind::Obstacle, on_map: true,
+                     width: 1, length: MAP_HEIGHT,
+                     pose: (0, 0, 0.0),
+                     ..Agent::default()};
+    agents.push(edge);
+
     agents
 }
 
@@ -1171,10 +1212,10 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
             agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1).round().max(1.0) as usize;
         },
         Action::AccelerateForward => {
-            // agent.velocity = (agent.velocity + 1).min(3);
+            agent.velocity = (agent.velocity + 1).min(3);
         },
         Action::AccelerateBackward => {
-            // agent.velocity = (agent.velocity - 1).max(-3);
+            agent.velocity = (agent.velocity - 1).max(-3);
         },
         Action::Brake => {
             if agent.velocity.abs() <= 2 {
@@ -1278,6 +1319,9 @@ fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
                 // old collision
                 continue;
             }
+            if agent1.kind == AgentKind::Obstacle && agent2.kind == AgentKind::Obstacle {
+                continue; // not important
+            }
 
             let bounds2 = bounding_rects[agent2_i];
             // first perform lowest-res collision test
@@ -1317,7 +1361,7 @@ fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
                     if min_a > min_b { max_b - min_a } else { 0.0 }
                 };
 
-                intensity += depth * rel_vel;
+                intensity += depth * rel_vel.abs().max(1.0);
             }
 
             if agent1.kind == AgentKind::Obstacle || agent2.kind == AgentKind::Obstacle {
@@ -1352,14 +1396,14 @@ fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
         {
             let mut agent1 = &mut agents[collision.agent1_i];
             if agent1.kind != AgentKind::Obstacle && agent1.frozen_steps == 0 {
-                agent1.health -= collision.damage1;
+                agent1.health = (agent1.health - collision.damage1).max(0);
                 agent1.frozen_steps = FROZEN_STEPS;
                 agent1.velocity = 0;
             }
         }
         let mut agent2 = &mut agents[collision.agent2_i];
         if agent2.kind != AgentKind::Obstacle && agent2.frozen_steps == 0 {
-            agent2.health -= collision.damage2;
+            agent2.health = (agent2.health - collision.damage2).max(0);
             agent2.frozen_steps = FROZEN_STEPS;
             agent2.velocity = 0;
         }
@@ -1377,34 +1421,34 @@ fn run_timestep(map: &WorldMap, agents: &mut [Agent]) {
 
 #[get("/")]
 fn index(state: State<WorldState>) -> Template {
-	Template::render("index", &state.map)
+    Template::render("index", &state.map)
 }
 
 #[get("/agents")]
 fn get_agents(state: State<WorldState>) -> Json<Value> {
-	Json(json!(&*state.agents.lock().unwrap()))
+    Json(json!(&*state.agents.lock().unwrap()))
 }
 
 #[get("/resources/<file..>")]
 fn resources(file: PathBuf) -> Option<NamedFile> {
-	NamedFile::open(Path::new("resources/").join(file)).ok()
+    NamedFile::open(Path::new("resources/").join(file)).ok()
 }
 
 fn main() {
     let mut map = create_map();
     setup_map_paths(&mut map);
 
-    let mut agents = create_agents();
+    let mut agents = create_agents(&map);
     setup_agents(&map, &mut agents);
     let state = WorldState {map, agents: Arc::new(Mutex::new(agents))};
 
     let thread_state = state.clone();
     thread::spawn(move || {
-		loop {
-			thread::sleep(std::time::Duration::from_millis(400));
-			run_timestep(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
-		}
-	});
+        loop {
+            thread::sleep(std::time::Duration::from_millis(100));
+            run_timestep(&thread_state.map, &mut *thread_state.agents.lock().unwrap());
+        }
+    });
 
     rocket::ignite()
         .manage(state.clone())
