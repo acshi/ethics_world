@@ -119,19 +119,20 @@ fn test_spawn_pedestrian() {
         let on_outer = calc_occupied_perim_map(&agents, &map.pedestrian_outer_pts, path_width, false);
         let on_inner = calc_occupied_perim_map(&agents, &map.pedestrian_inner_pts, path_width, true);
 
-        let pose = spawn_on_two_perims(&map, &map.buildings, BUILDING_PEDESTRIAN_MARGIN,
-                                       (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
-                                       &map.pedestrian_outer_pts, &map.pedestrian_inner_pts,
-                                       &on_outer, &on_inner, SPAWN_MARGIN);
+        let spawn_result = spawn_on_two_perims(&map, &map.buildings, BUILDING_PEDESTRIAN_MARGIN,
+                                           (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
+                                           &map.pedestrian_outer_pts, &map.pedestrian_inner_pts,
+                                           &on_outer, &on_inner, SPAWN_MARGIN);
 
         println!("Inner points: {:?}", map.pedestrian_inner_pts);
         println!("Outer points: {:?}", map.pedestrian_outer_pts);
 
-        if let Some(pose) = pose {
+        if let Some((pose, building_i)) = spawn_result {
             let mut agent = &mut agents[agent_i];
             println!("Drew pose: {:?} and pedestrian: {:?}", pose, agent);
             agent.on_map = true;
             agent.pose = pose;
+            agent.source_building_i = building_i;
 
             let (width, length) = (agent.width as f32, agent.length as f32);
             let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32, agent.pose.2);
@@ -196,14 +197,14 @@ fn test_spawn_vehicle() {
             let path_width = map.vert_road_width.max(map.horiz_road_width) / 2;
             let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, path_width, false);
             let on_inner = calc_occupied_perim_map(&agents, &map.vehicle_inner_pts, path_width, true);
-            let pose = spawn_on_two_perims(&map, &map.buildings, BUILDING_VEHICLE_MARGIN,
-                                           (VEHICLE_WIDTH, VEHICLE_LENGTH),
-                                           &map.vehicle_outer_pts, &map.vehicle_inner_pts,
-                                           &on_outer, &on_inner, SPAWN_MARGIN);
+            let spawn_result = spawn_on_two_perims(&map, &map.buildings, BUILDING_VEHICLE_MARGIN,
+                                               (VEHICLE_WIDTH, VEHICLE_LENGTH),
+                                               &map.vehicle_outer_pts, &map.vehicle_inner_pts,
+                                               &on_outer, &on_inner, SPAWN_MARGIN);
 
             // println!("Inner points: {:?}", map.vehicle_inner_pts);
 
-            if let Some(pose) = pose {
+            if let Some((pose, building_i)) = spawn_result {
                 // can only be on one of the two lanes/paths
                 for agent in agents.iter() {
                     assert_ne!(Pose{x: agent.pose.0, y: agent.pose.1, theta: agent.pose.2},
@@ -214,6 +215,7 @@ fn test_spawn_vehicle() {
                 println!("Drew pose: {:?} and vehicle: {:?}", pose, agent);
                 agent.on_map = true;
                 agent.pose = pose;
+                agent.source_building_i = building_i;
             }
         }
     }

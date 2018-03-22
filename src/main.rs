@@ -1263,10 +1263,8 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
             return;
         },
         Action::Frozen => {
-            agent.frozen_steps -= 1;
-            if agent.frozen_steps == 0 {
-                // agent.frozen_steps = 1;
-                agent.on_map = false;
+            if agent.frozen_steps > 0 {
+                agent.frozen_steps -= 1;
             }
             return;
         },
@@ -1289,7 +1287,15 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
 fn update_agents(map: &WorldMap, agents: &mut [Agent]) {
     let mut actions = agents.iter().map(|a| choose_action(map, agents, a)).collect::<Vec<_>>();
     for (i, action) in actions.drain(..).enumerate() {
-        apply_action(map, &mut agents[i], action);
+        apply_action(map, &mut agents[i], action.clone());
+
+        if action == Action::Frozen && agents[i].frozen_steps == 0 {
+            if agents[i].health == 0 {
+                agents[i].on_map = false;
+            } else {
+                clear_from_collision(agents, i);
+            }
+        }
     }
 }
 
@@ -1332,7 +1338,8 @@ fn get_velocity_vec(agent: &Agent) -> (f32, f32) {
     (agent.velocity as f32 * sin_t, agent.velocity as f32 * cos_t)
 }
 
-fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
+// optionally only looks for collisions where a specified agent index is one of the two agents
+fn find_collisions_with(agents: &[Agent], single_agent: Option<usize>) -> Vec<Collision> {
     let mut collisions = Vec::new();
 
     let bounding_rects = agents.iter().map(|a|
@@ -1358,6 +1365,10 @@ fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
             }
             if agent1.kind == AgentKind::Obstacle && agent2.kind == AgentKind::Obstacle {
                 continue; // not important
+            }
+            if !single_agent.is_none() && (single_agent.unwrap() != agent1_i &&
+                                           single_agent.unwrap() != agent2_i) {
+                continue; // not relevant for our current search
             }
 
             let bounds2 = bounding_rects[agent2_i];
@@ -1428,6 +1439,35 @@ fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
     collisions
 }
 
+fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
+    find_collisions_with(agents, None)
+}
+
+fn clear_from_collision(agents: &mut [Agent], agent_i: usize) {
+    // try to move the target agent as little as possible to clear it from all others
+    // following a collision
+    let pose = agents[agent_i].pose;
+    for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4].iter() {
+        for dx in [0, 1, -1, 2, -2, 3, -3, 4, -4].iter() {
+            let mut new_pose = pose;
+            new_pose.0 = (new_pose.0 as isize + dx).max(1) as usize;
+            new_pose.0 = new_pose.0.min(MAP_WIDTH - 1);
+            new_pose.1 = (new_pose.1 as isize + dy).max(1) as usize;
+            new_pose.1 = new_pose.1.min(MAP_HEIGHT - 1);
+            agents[agent_i].pose = new_pose;
+            if find_collisions_with(agents, Some(agent_i)).len() == 0 {
+                println!("Freed collision by moving agent {} by ({}, {})", agent_i, dx, dy);
+                return;
+            }
+        }
+    }
+    // could not find a way to save the person. Count them as dead!
+    println!("Could not free agent {}, counting it dead", agent_i);
+    agents[agent_i].pose = pose;
+    agents[agent_i].health = 0;
+    agents[agent_i].on_map = false;
+}
+
 fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
     for collision in collisions.iter() {
         {
@@ -1462,7 +1502,7 @@ fn replace_dead_agents(agents: &mut [Agent]) -> usize {
     let mut replaced = 0;
     // replace agents that have died
     for i in 0..agents.len() {
-        if !agents[i].on_map && agents[i].health == 0 {
+        if !agents[i].on_map && agents[i].health == 0 && agents[i].kind != AgentKind::Obstacle {
             agents[i] = evolve_new_agent(agents, agents[i].kind);
             replaced += 1;
         }
@@ -1537,7 +1577,7 @@ fn main() {
     let thread_state = state.clone();
     thread::spawn(move || {
         loop {
-            thread::sleep(std::time::Duration::from_millis(100));
+            thread::sleep(std::time::Duration::from_millis(400));
             let thread_state = &mut *thread_state.lock().unwrap();
             run_timestep(&thread_state.map, &mut thread_state.agents, &mut thread_state.stats);
         }
