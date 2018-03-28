@@ -99,6 +99,9 @@ function render() {
         ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#ee6600";
         ctx.fillRect(0, 0, a.width * scale * 2 / 3, a.length * scale * 2 / 3);
+        ctx.font = "30px Arial";
+        ctx.textBaseline = "top";
+        ctx.fillText("" + a.health, 5, 5);
         ctx.fillStyle = "#ffff00";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
 
@@ -142,7 +145,7 @@ function update() {
         update_stats();
 
         requestAnimationFrame(render);
-        setTimeout(update, 200);
+        setTimeout(update, 20);
     };
     r.send();
 }
