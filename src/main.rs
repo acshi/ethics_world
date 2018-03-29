@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 use std::f32::{self, consts};
 use std::thread;
-use std::io;
+use std::io::{self, Write};
+use std::fs;
 use fnv::FnvHashMap;
 use rocket::{State};
 use rocket::response::{NamedFile};
@@ -109,12 +110,12 @@ const THETA_PER_INC: f32 = consts::PI / 8.0;
 const TWO_PI_INCS: u32 = ((2.0 * consts::PI) / (THETA_PER_INC) + 0.5) as u32;
 const PI_INCS: u32 = TWO_PI_INCS / 2;
 const PI_OVER_TWO_INCS: u32 = PI_INCS / 2;
-const BUILDING_N: usize = 30;
+const BUILDING_N: usize = 2;//4;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: u32 = 6;
 const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
-const PEDESTRIAN_N: usize = 6; // those on map at one time
-const VEHICLE_N: usize = 6;
+const PEDESTRIAN_N: usize = 1;//6; // those on map at one time
+const VEHICLE_N: usize = 0;//4;
 const SPAWN_MARGIN: u32 = 3; // clearance from other agents when spawning
 
 const BUILDING_WIDTH: u32 = 3; // just a facade
@@ -137,11 +138,13 @@ const BUILDING_PEDESTRIAN_MARGIN: u32 = 3;
 // distance (besides crosswalk) at which the vehicle is considered adjacent to the building
 const BUILDING_VEHICLE_MARGIN: u32 = 6;
 
+const HEAL_REWARD: i32 = 10;
+
 // for the MDP processes
 const STATE_AVOID_DIST: u32 = 22;
-const EXPLORE_ONE_IN: u32 = 10;
-const Q_LEARN_RATE: f32 = 0.2;
-const Q_DISCOUNT: f32 = 0.95;
+const EXPLORE_ONE_IN: u32 = 4;
+const Q_LEARN_RATE: f32 = 0.8;
+const Q_DISCOUNT: f32 = 0.99;
 
 bitflags! {
     struct Cell: u8 {
@@ -227,6 +230,10 @@ fn fill_map_rect(grid: &mut [Cell], left: u32, top: u32,
 }
 
 fn create_buildings(m: &mut WorldMap) {
+    if BUILDING_N <= 1 {
+        panic!("Building number too low! must be at least 2 to create destinations.");
+    }
+
     let mut rng = rand::thread_rng();
 
     let outer_perim = m.horiz_road_length * 2 + m.vert_road_length * 2;
@@ -493,7 +500,7 @@ struct Agent {
     pose: (u32, u32, u32), // x, y, theta (increments of THETA_PER_INC)
     width: u32, // perpendicular to theta
     length: u32, // in direction of theta
-    velocity: isize,
+    velocity: i32,
     health: i32,
 
     source_building_i: u32,
@@ -587,7 +594,7 @@ fn difference<T>(a: T, b: T) -> T
 }
 
 fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
-                              -> ((u32, u32), (u32, u32)) {
+                              -> BoundingRect {
     let (x, y, t) = p;
     let t = t as i32;
     let (sx, sy) = size;
@@ -596,15 +603,15 @@ fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
     let rl = rotate_pt((0.0, sy as f32), -t);
     let (x, y) = (x as f32, y as f32);
 
-    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).floor().max(0.0) as u32;
-    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).floor().max(0.0) as u32;
-    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).ceil().max(0.0) as u32;
-    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).ceil().max(0.0) as u32;
+    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).floor() as i32;
+    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).floor() as i32;
+    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).ceil() as i32;
+    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).ceil() as i32;
 
     ((min_x, min_y), (max_x, max_y))
 }
 
-fn create_bounding_rect_table_for_size(size: (u32, u32)) -> Vec<((u32, u32), (u32, u32))> {
+fn create_bounding_rect_table_for_size(size: (u32, u32)) -> Vec<BoundingRect> {
     let mut v = Vec::with_capacity((MAP_WIDTH * MAP_HEIGHT * TWO_PI_INCS) as usize);
     for x in 0..MAP_WIDTH {
         for y in 0..MAP_HEIGHT {
@@ -618,13 +625,13 @@ fn create_bounding_rect_table_for_size(size: (u32, u32)) -> Vec<((u32, u32), (u3
 }
 
 lazy_static! {
-    static ref PEDESTRIAN_BOUNDING_RECT_TABLE: Vec<((u32, u32), (u32, u32))> = {
+    static ref PEDESTRIAN_BOUNDING_RECT_TABLE: Vec<BoundingRect> = {
         create_bounding_rect_table_for_size((PEDESTRIAN_SIZE, PEDESTRIAN_SIZE))
     };
-    static ref VEHICLE_BOUNDING_RECT_TABLE: Vec<((u32, u32), (u32, u32))> = {
+    static ref VEHICLE_BOUNDING_RECT_TABLE: Vec<BoundingRect> = {
         create_bounding_rect_table_for_size((VEHICLE_WIDTH, VEHICLE_LENGTH))
     };
-    static ref BUILDING_BOUNDING_RECT_TABLE: Vec<((u32, u32), (u32, u32))> = {
+    static ref BUILDING_BOUNDING_RECT_TABLE: Vec<BoundingRect> = {
         let mut v = Vec::with_capacity((MAP_WIDTH * MAP_HEIGHT) as usize);
         for x in 0..MAP_WIDTH {
             for y in 0..MAP_HEIGHT {
@@ -655,7 +662,7 @@ fn fast_sin_cos(theta_incs: i32) -> (f32, f32) {
 
 #[inline(always)]
 fn lookup_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
-                              -> ((u32, u32), (u32, u32)) {
+                              -> BoundingRect {
     if size.0 == PEDESTRIAN_SIZE && size.1 == PEDESTRIAN_SIZE {
         let i = p.2 + p.1 * TWO_PI_INCS + p.0 * (TWO_PI_INCS * MAP_HEIGHT);
         return PEDESTRIAN_BOUNDING_RECT_TABLE[i as usize];
@@ -669,18 +676,14 @@ fn lookup_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
         return BUILDING_BOUNDING_RECT_TABLE[i as usize];
     }
     // should be just walls left
-    if size.1 == MAP_WIDTH {
-        if p.1 == 1 {
-            return ((0, 0), (MAP_WIDTH, 1)); // top
-        } else {
-            return ((0, MAP_HEIGHT - 1), (MAP_WIDTH, MAP_HEIGHT)); // bottom
-        }
+    if size.1 == MAP_WIDTH && p.1 == 1 {
+        return ((0, 0), (MAP_WIDTH as i32, 1)); // top
+    } else if size.1 == MAP_HEIGHT && p.0 == MAP_WIDTH - 1 {
+        return ((MAP_WIDTH as i32 - 1, 0), (MAP_WIDTH as i32, MAP_HEIGHT as i32)); // right
+    } else if size.1 == MAP_WIDTH && p.1 == MAP_HEIGHT {
+        return ((0, MAP_HEIGHT as i32 - 1), (MAP_WIDTH as i32, MAP_HEIGHT as i32)); // bottom
     } else if size.1 == MAP_HEIGHT {
-        if p.0 == 0 {
-            return ((0, 0), (1, MAP_HEIGHT)); // left
-        } else {
-            return ((MAP_WIDTH - 1, 0), (MAP_WIDTH, MAP_HEIGHT)); // right
-        }
+        return ((0, 0), (1, MAP_HEIGHT as i32)); // left
     }
     pose_size_to_bounding_rect(p, size)
 }
@@ -709,7 +712,7 @@ fn obj_dist_1(a: (u32, u32, u32), size_a: (u32, u32),
     } else {
         if hy2 < ly1 { ly1 - hy2 } else { 0 }
     };
-    x_diff + y_diff
+    (x_diff + y_diff) as u32
 }
 
 fn calc_total_perim(pts: &RectU32) -> u32 {
@@ -1379,39 +1382,61 @@ impl Action {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 struct QStateAvoid {
-    is_pedestrian: bool,
-    other_pedestrian: bool,
+    vel: i32,
+    // is_pedestrian: bool,
+    // other_pedestrian: bool,
     other_x: i32,
     other_y: i32,
     other_theta: u32,
+    other_vel: i32,
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 struct QStateTarget {
-    is_pedestrian: bool,
+    // is_pedestrian: bool,
     x: u32,
     y: u32,
     theta: u32,
+    vel: i32,
     destination_building_i: u32,
 }
 
 fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
-    let (sin_a, cos_a) = fast_sin_cos(agent.pose.2 as i32);
+    let (sin_a, cos_a) = fast_sin_cos(-(agent.pose.2 as i32));
     let dx = (other.pose.0 as f32) - (agent.pose.0 as f32);
     let dy = (other.pose.1 as f32) - (agent.pose.1 as f32);
     let rel_x = cos_a * dx + sin_a * dy;
-    let rel_y = -sin_a * dy + cos_a * dy;
-    QStateAvoid { is_pedestrian: agent.kind == AgentKind::Pedestrian,
-                  other_pedestrian: other.kind == AgentKind::Pedestrian,
-                  other_x: (rel_x + 0.5) as i32,
-                  other_y: (rel_y + 0.5) as i32,
-                  other_theta: (other.pose.2 + TWO_PI_INCS - agent.pose.2) % TWO_PI_INCS,
+    let rel_y = -sin_a * dx + cos_a * dy;
+    let rel_x = rel_x.round() as i32;
+    let rel_y = rel_y.round() as i32;
+    let rel_theta = (other.pose.2 + TWO_PI_INCS - agent.pose.2) % TWO_PI_INCS;
+    let ((lx, ly), (hx, hy)) = pose_size_to_bounding_rect((0, 0, rel_theta),
+                                                          (other.width, other.length));
+    let ((lx, ly), (hx, hy)) = ((lx as i32 + rel_x,
+                                ly as i32 + rel_y),
+                                (hx as i32 + rel_x,
+                                hy as i32 + rel_y));
+    let rel_x = if lx * hx <= 0 { 0 } else {
+        if lx.abs() < hx.abs() { lx } else { hx }
+    };
+    let rel_y = if ly * hy <= 0 { 0 } else {
+        if ly.abs() < hy.abs() { ly } else { hy }
+    };
+    QStateAvoid {
+                  // is_pedestrian: agent.kind == AgentKind::Pedestrian,
+                  // other_pedestrian: other.kind == AgentKind::Pedestrian,
+                  vel: agent.velocity,
+                  other_x: rel_x,
+                  other_y: rel_y,
+                  other_theta: rel_theta,
+                  other_vel: other.velocity,
                 }
 }
 
 fn qstate_target_for_agent(agent: &Agent) -> QStateTarget {
-    QStateTarget { is_pedestrian: agent.kind == AgentKind::Pedestrian,
-                   x: agent.pose.0, y: agent.pose.1, theta: agent.pose.2,
+    QStateTarget {
+                   // is_pedestrian: agent.kind == AgentKind::Pedestrian,
+                   x: agent.pose.0, y: agent.pose.1, theta: agent.pose.2, vel: agent.velocity,
                    destination_building_i: agent.destination_building_i,
                  }
 }
@@ -1437,25 +1462,32 @@ fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
 
     let qstate_target = qstate_target_for_agent(agent);
     let mut weights = vec![0.0; actions.len()];
-    let mut num_avoids = 0;
-    for other_i in 0..agents.len() {
-        let dist = get_agent_1_dist(&agent_dists, agent_i, other_i);
-        if dist < STATE_AVOID_DIST {
-            num_avoids += 1;
-            let qstate_avoid = qstate_avoid_for_agent(agent, &agents[other_i]);
-            let more_weights = q.avoid_values.get(&qstate_avoid);
-            if let Some(more_weights) = more_weights {
-                for (i, w) in more_weights.iter().enumerate() {
-                    weights[i] += w;
-                }
-            }
-        }
-    }
+    let mut num_weights = 0;
+    // for other_i in 0..agents.len() {
+    //     let dist = get_agent_1_dist(&agent_dists, agent_i, other_i);
+    //     if dist < STATE_AVOID_DIST {
+    //         num_weights += 1;
+    //         let qstate_avoid = qstate_avoid_for_agent(agent, &agents[other_i]);
+    //         let more_weights = q.avoid_values.get(&qstate_avoid);
+    //         if let Some(more_weights) = more_weights {
+    //             for (i, w) in more_weights.iter().enumerate() {
+    //                 weights[i] += w;
+    //             }
+    //         }
+    //     }
+    // }
 
     let q_target_vals = q.target_values.get(&qstate_target);
     if let Some(q_target_vals) = q_target_vals {
-        for (i, w) in q_target_vals.iter().enumerate() {
-            weights[i] = (weights[i] / (num_avoids as f32) + w) * 0.5;
+        num_weights += 1;
+        for (i, &w) in q_target_vals.iter().enumerate() {
+            weights[i] += w;
+        }
+    }
+
+    if num_weights > 1 {
+        for i in 0..weights.len() {
+            weights[i] /= num_weights as f32;
         }
     }
 
@@ -1511,7 +1543,7 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         }
         return action;
     } else {
-        if rng.gen_weighted_bool(200) {
+        if rng.gen_weighted_bool(10000) {
             println!("Made decision based on best q-value of {}", best_choice.1);
         }
         return best_choice.0;
@@ -1602,7 +1634,7 @@ struct Collision {
     damage2: i32,
 }
 
-type BoundingRect = ((u32, u32), (u32, u32));
+type BoundingRect = ((i32, i32), (i32, i32));
 
 fn bounds_intersect(a: BoundingRect, b: BoundingRect) -> bool {
     let ((lx1, ly1), (hx1, hy1)) = a;
@@ -1861,6 +1893,7 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
                                 { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
         if dist <= building_margin {
             agent.on_map = false;
+            agent.health = (agent.health + HEAL_REWARD).min(99);
             trips_completed.push(i);
         }
     }
@@ -1870,12 +1903,13 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
 
 fn update_qtables(q: &mut QLearning,
                   q_targets: &Vec<QStateTarget>, q_avoids: &Vec<Vec<QStateAvoid>>,
-                  actions: &[Action], agents: &[Agent], new_qs: &[f32]) {
+                  actions: &[Action], new_qs: &[Option<f32>]) {
     let normal_actions = Action::normal_actions();
     for (i, &new_q) in new_qs.iter().enumerate() {
-        if !agents[i].on_map || agents[i].kind == AgentKind::Obstacle {
+        if new_q.is_none() {
             continue;
         }
+        let new_q = new_q.unwrap();
 
         let action_i = normal_actions.iter().position(|&a| a == actions[i]);
         if action_i.is_none() {
@@ -1887,17 +1921,21 @@ fn update_qtables(q: &mut QLearning,
             q.target_values.insert(q_targets[i], vec![0.0; normal_actions.len()]);
         }
         let mut q_target = q.target_values.get_mut(&q_targets[i]).unwrap();
-        q_target[action_i] = (1.0 - Q_LEARN_RATE) * q_target[action_i] + Q_LEARN_RATE * new_q;
+        let old_val = q_target[action_i];
+        let new_val = (1.0 - Q_LEARN_RATE) * old_val + Q_LEARN_RATE * new_q;
+        q_target[action_i] = new_val;
+        // println!("{:?} has {:?}", &q_targets[i], q_target);
 
-        let q_avoids = &q_avoids[i];
-        for &q_avoid in q_avoids {
-            if !q.avoid_values.contains_key(&q_avoid) {
-                q.avoid_values.insert(q_avoid, vec![0.0; normal_actions.len()]);
-            }
-            let mut q_avoid_val = q.avoid_values.get_mut(&q_avoid).unwrap();
-            q_avoid_val[action_i] = (1.0 - Q_LEARN_RATE) * q_avoid_val[action_i] +
-                                    Q_LEARN_RATE * new_q;
-        }
+        // let q_avoids = &q_avoids[i];
+        // for &q_avoid in q_avoids {
+        //     if !q.avoid_values.contains_key(&q_avoid) {
+        //         q.avoid_values.insert(q_avoid, vec![0.0; normal_actions.len()]);
+        //     }
+        //     let mut q_avoid_val = q.avoid_values.get_mut(&q_avoid).unwrap();
+        //     let old_val = q_avoid_val[action_i];
+        //     let new_val = (1.0 - Q_LEARN_RATE) * old_val + Q_LEARN_RATE * new_q;
+        //     q_avoid_val[action_i] = new_val;
+        // }
     }
 }
 
@@ -1923,18 +1961,21 @@ fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> V
 }
 
 fn calc_best_q_value(q: &mut QLearning, agents: &[Agent],
-                     agent_dists: &AgentDistanceTable, agent_i: usize) -> f32 {
+                     agent_dists: &AgentDistanceTable, agent_i: usize) -> Option<f32> {
     let agent = &agents[agent_i];
-    if !agent.on_map || agent.kind == AgentKind::Obstacle {
-        return 0.0;
+    if !agent.on_map || agent.frozen_steps > 0 || agent.kind == AgentKind::Obstacle {
+        return None;
     }
     let weights = habit_theory_weights(q, agents, agent_dists, agent_i);
-    weights.iter().fold(f32::MIN, |a, &b| a.max(b))
+    let max_w = weights.iter().fold(f32::MIN, |a, &b| a.max(b));
+    Some(max_w)
 }
 
-fn add_q_reward(new_qs: &mut Vec<f32>, agent_is: &[usize], score: f32) {
+fn add_q_reward(new_qs: &mut Vec<Option<f32>>, agent_is: &[usize], score: f32) {
     for &i in agent_is {
-        new_qs[i] += score;
+        if let Some(val) = new_qs[i] {
+            new_qs[i] = Some(val + score);
+        }
     }
 }
 
@@ -1973,35 +2014,52 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
     let prior_q_targets = agents.iter().map(|a| qstate_target_for_agent(a)).collect::<Vec<_>>();
     let prior_q_avoids = calc_q_avoids_states(agents, &agent_dists); // here
 
-    let mut new_qs = (0..agents.len()).map(|i|
-                            Q_DISCOUNT * calc_best_q_value(q, agents, &agent_dists, i))
-                           .collect::<Vec<_>>();
-
     let actions = update_agents(map, q, agents, &agent_dists); // here
     let collisions = find_collisions(agents);
     resolve_collisions(agents, &collisions);
     stats.collisions += collisions.len() as u32;
 
+    let agent_dists = compute_agent_1_dists(&agents);
+    let mut new_qs = (0..agents.len()).map(|i|
+                            Some(Q_DISCOUNT * calc_best_q_value(q, agents, &agent_dists, i)?))
+                           .collect::<Vec<_>>();
+
     for c in collisions.iter() {
-        new_qs[c.agent1_i] -= c.damage1 as f32;
-        new_qs[c.agent2_i] -= c.damage2 as f32;
+        if let Some(val) = new_qs[c.agent1_i] {
+            new_qs[c.agent1_i] = Some(val - c.damage1 as f32);
+        }
+        if let Some(val) = new_qs[c.agent2_i] {
+            new_qs[c.agent2_i] = Some(val - c.damage2 as f32);
+        }
     }
+
+    // for (i, a) in agents.iter().enumerate() {
+    //     let building_i = a.destination_building_i;
+    //     let building_agent_i = map.buildings[building_i as usize].agent_i;
+    //     let dist_to_goal = get_agent_1_dist(&agent_dists, i, building_agent_i) as f32;
+    //     new_qs[i] += (MAP_WIDTH + MAP_HEIGHT) as f32 - dist_to_goal;
+    // }
 
     let trips_completed = evaluate_trips(map, agents, &agent_dists); // here
     stats.trips_completed += trips_completed.len() as u32;
-    add_q_reward(&mut new_qs, &trips_completed, 100.0);
+    // for &i in trips_completed.iter() {
+    //     if new_qs[i].unwrap_or(0.0) != 0.0 {
+    //         std::process::abort();
+    //     }
+    // }
+    add_q_reward(&mut new_qs, &trips_completed, 1e4);
 
     let dead = find_dead_agents(agents);
     stats.dead += dead.len() as u32;
-    add_q_reward(&mut new_qs, &dead, -100.0);
+    // add_q_reward(&mut new_qs, &dead, -100.0);
 
     // constant for the timestep
-    let active_agents = (0..agents.len()).filter(|&i|
-                                agents[i].on_map && agents[i].kind != AgentKind::Obstacle)
-                                .collect::<Vec<_>>();
-    add_q_reward(&mut new_qs, &active_agents, -0.1);
+    // let active_agents = (0..agents.len()).filter(|&i|
+    //                             agents[i].on_map && agents[i].kind != AgentKind::Obstacle)
+    //                             .collect::<Vec<_>>();
+    // add_q_reward(&mut new_qs, &active_agents, -0.1);
 
-    update_qtables(q, &prior_q_targets, &prior_q_avoids, &actions, &agents, &new_qs);
+    update_qtables(q, &prior_q_targets, &prior_q_avoids, &actions, &new_qs);
 
     replace_dead_agents(agents, &dead);
     replenish_pedestrians(map, agents);
@@ -2021,6 +2079,37 @@ fn get_update(state: State<WorldState>) -> Json<Value> {
 #[get("/resources/<file..>")]
 fn resources(file: PathBuf) -> Option<NamedFile> {
     NamedFile::open(Path::new("resources/").join(file)).ok()
+}
+
+fn q_diagnostic(q: &QLearning) {
+    let mut f = match fs::File::create("q_diag.csv") {
+        Ok(f) => f,
+        Err(e) => panic!("file error: {}", e),
+    };
+
+    for y in 0..MAP_HEIGHT {
+        for x in 0..MAP_WIDTH {
+            let mut best = f32::MIN;
+            for theta in 0..TWO_PI_INCS {
+                for vel in -3..4 {
+                    let q_targ = QStateTarget {x, y, theta, vel, destination_building_i: 0 };
+                    let vals = q.target_values.get(&q_targ);
+                    if vals.is_none() {
+                        continue;
+                    }
+                    let vals = vals.unwrap();
+                    for &val in vals {
+                        if val > best {
+                            best = val;
+                        }
+                    }
+                }
+            }
+            write!(f, "{}, ", best).unwrap();
+        }
+        writeln!(f, "").unwrap();
+    }
+
 }
 
 fn main() {
@@ -2056,10 +2145,11 @@ fn main() {
         loop {
             if io_receiver.try_recv().is_ok() {
                 run_slow = !run_slow;
+                q_diagnostic(&q);
             }
             if run_slow {
-                thread::sleep(std::time::Duration::from_millis(20));
-            } else if (iter % 10) == 0 {
+                thread::sleep(std::time::Duration::from_millis(15));
+            } else if (iter % 400) == 0 {
                 thread::sleep(std::time::Duration::from_millis(1));
                 iter = 0;
             }

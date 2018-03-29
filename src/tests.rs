@@ -158,7 +158,7 @@ fn test_initially_unoccupied() {
 
 #[test]
 fn test_spawning_unique() {
-    for i in 0..100 {
+    for i in 0..30 {
         println!("\nAttempt #: {}", i);
 
         let mut map = create_map();
