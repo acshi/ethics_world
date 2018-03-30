@@ -13,6 +13,7 @@ extern crate serde_json;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate lazy_static;
 extern crate fnv;
+extern crate config;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -37,72 +38,6 @@ use general_search::{PriorityQueue, SearchProblemTrait, SearchNode,
 #[cfg(test)]
 mod tests;
 
-// #[derive(Clone)]
-// struct MapSearchState([u8; MAP_SIZE]);
-//
-// impl PartialEq for MapSearchState {
-//     fn eq(&self, other: &MapSearchState) -> bool {
-//         self.0[..] == other.0[..]
-//         // let n_sections = MAP_SIZE / 32;
-//         // for i in 0..n_sections {
-//         //     let start_i = i * 32;
-//         //     let end_i = start_i + 32;
-//         //     if self.0[start_i..end_i] != other.0[start_i..end_i] {
-//         //         return false;
-//         //     }
-//         // }
-//         // return self.0[n_sections*32..] == other.0[n_sections*32..0];
-//     }
-// }
-//
-// impl Eq for MapSearchState {}
-//
-// impl Hash for MapSearchState {
-//     fn hash<H: Hasher>(&self, state: &mut H) {
-//         self.0[..].hash(state);
-//     }
-// }
-//
-// struct MapSearchExpansion(i32);
-// impl Iterator for MapSearchExpansion {
-//     type Item = (MapSearchState, i32);
-//     fn next(&mut self) -> Option<(MapSearchState, i32)> {
-//         None
-//     }
-// }
-//
-// struct MapSearchTraits;
-// impl SearchProblemTrait<MapSearchState> for MapSearchTraits {
-//     fn is_goal(&self, node: &SearchNode<MapSearchState>) -> bool {
-//         node.state.0[0] == 0
-//     }
-//
-//     fn step_cost(&self, node: &SearchNode<MapSearchState>, action: i32) -> f32 {
-//         action as f32
-//     }
-//
-//     fn ordering_cost(&self, node: &SearchNode<MapSearchState>) -> f32 {
-//         node.path_cost
-//     }
-//
-//     fn expand_state(&self, node: &SearchNode<MapSearchState>) -> Box<Iterator<Item = (MapSearchState, i32)>> {
-//         Box::new(MapSearchExpansion(node.state.0[0] as i32))
-//     }
-// }
-
-// fn create_map() {
-//     let mut p = create_search_problem::<MapSearchState, PriorityQueue<SearchNode<MapSearchState>>>
-//                                         (MapSearchState([0; MAP_SIZE]), &MapSearchTraits{}, true, true);
-//     {
-//         let result = tree_search(&mut p);
-//         if let Some(sol) = result {
-//             println!("Found solution with cost {:.2} at depth {} after expanding {} nodes", sol.path_cost, sol.depth, sol.get_expansion_count());
-//             return;
-//         }
-//     }
-//     println!("Falied to find solution after expanding {} nodes", p.get_expansion_count())
-// }
-
 const MAP_WIDTH: u32 = 74;
 const MAP_HEIGHT: u32 = 74;
 const MAP_SIZE: u32 = MAP_WIDTH * MAP_HEIGHT;
@@ -113,9 +48,6 @@ const PI_OVER_TWO_INCS: u32 = PI_INCS / 2;
 const BUILDING_N: usize = 2;//4;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: u32 = 6;
-const POPULATION_N: usize = 24; // one-half this for each of pedestrians and vehicles
-const PEDESTRIAN_N: usize = 1;//6; // those on map at one time
-const VEHICLE_N: usize = 0;//4;
 const SPAWN_MARGIN: u32 = 3; // clearance from other agents when spawning
 
 const BUILDING_WIDTH: u32 = 3; // just a facade
@@ -138,13 +70,54 @@ const BUILDING_PEDESTRIAN_MARGIN: u32 = 3;
 // distance (besides crosswalk) at which the vehicle is considered adjacent to the building
 const BUILDING_VEHICLE_MARGIN: u32 = 6;
 
-const HEAL_REWARD: i32 = 10;
+#[derive(Debug, Deserialize)]
+struct ConfSettings {
+	population_n: usize, // one-half this for each of pedestrians and vehicles
+    pedestrian_n: usize, // those on map at one time
+    vehicle_n: usize,
 
-// for the MDP processes
-const STATE_AVOID_DIST: u32 = 22;
-const EXPLORE_ONE_IN: u32 = 4;
-const Q_LEARN_RATE: f32 = 0.8;
-const Q_DISCOUNT: f32 = 0.99;
+    // for the MDP/Q-Learning processses
+    state_avoid_dist: u32,
+    explore_one_in_min: u32,
+    explore_one_in_max: u32,
+    q_learn_rate: f32,
+    q_discount: f32,
+    damage_coef: f32,
+    trip_reward: f32,
+
+    forward_accel: u32,
+    backward_accel: u32,
+    max_forward_vel: u32,
+    max_backward_vel: u32,
+    brake_power: u32,
+
+    heal_reward: i32,
+
+    fast_steps_per_update: u64,
+    slow_step_ms: u64,
+}
+
+lazy_static! {
+    static ref C: ConfSettings = {
+        let mut conf = config::Config::default();
+    	match conf.merge(config::File::with_name("settings")) {
+    		Ok(_) => (),
+    		Err(e) => {
+    			eprintln!("Error opening settings.toml file: {}", e);
+    			std::process::exit(-1);
+    		}
+    	}
+
+        let settings: ConfSettings = match conf.try_into() {
+    		Ok(settings) => settings,
+    		Err(e) => {
+    			eprintln!("Configuration error in settings.toml file: {}", e);
+    			std::process::exit(-1);
+    		}
+    	};
+        settings
+    };
+}
 
 bitflags! {
     struct Cell: u8 {
@@ -1206,7 +1179,7 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
 
     let mut p_count = agents.iter().filter(|p|
                                             p.kind == AgentKind::Pedestrian && p.on_map).count();
-    while p_count < PEDESTRIAN_N {
+    while p_count < C.pedestrian_n {
         let agent_i = draw_off_map_agent_i(&agents, AgentKind::Pedestrian);
         if agent_i.is_none() {
             break; // no agents left to draw
@@ -1249,7 +1222,7 @@ fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
 
     let mut v_count = agents.iter().filter(|p| p.kind == AgentKind::Vehicle && p.on_map).count();
 
-    while v_count < VEHICLE_N {
+    while v_count < C.vehicle_n {
         let agent_i = draw_off_map_agent_i(&agents, AgentKind::Vehicle);
         if agent_i.is_none() {
             break; // no agents left to draw
@@ -1319,21 +1292,21 @@ fn create_edge_walls() -> Vec<Agent> {
 
 fn create_agents(map: &mut WorldMap) -> Vec<Agent> {
     let mut agents = Vec::new();
-    let mut p = Agent{kind: AgentKind::Pedestrian,
+    let p = Agent{kind: AgentKind::Pedestrian,
                       width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE,
                       health: 99,
+                      habit_theory: 1.0,
                       ..Agent::default()};
-    p.folk_theory = 1.0;
-    for _ in 0..(POPULATION_N/2) {
+    for _ in 0..(C.population_n/2) {
         agents.push(p.clone());
     }
 
-    let mut v = Agent{kind: AgentKind::Vehicle,
+    let v = Agent{kind: AgentKind::Vehicle,
                       width: VEHICLE_WIDTH, length: VEHICLE_LENGTH,
                       health: 99,
+                      habit_theory: 1.0,
                       ..Agent::default()};
-    v.folk_theory = 1.0;
-    for _ in 0..(POPULATION_N/2) {
+    for _ in 0..(C.population_n/2) {
         agents.push(v.clone());
     }
 
@@ -1455,58 +1428,182 @@ impl Default for QLearning {
     }
 }
 
-fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
-                        agent_dists: &AgentDistanceTable, agent_i: usize) -> Vec<f32> {
-    let agent = &agents[agent_i];
-    let actions = Action::normal_actions();
-
+fn q_target_weights(q: &mut QLearning, select_actions: &[Action], agent: &Agent)
+                    -> Vec<f32> {
+    let mut weights = vec![0.0; select_actions.len()];
     let qstate_target = qstate_target_for_agent(agent);
-    let mut weights = vec![0.0; actions.len()];
-    let mut num_weights = 0;
-    // for other_i in 0..agents.len() {
-    //     let dist = get_agent_1_dist(&agent_dists, agent_i, other_i);
-    //     if dist < STATE_AVOID_DIST {
-    //         num_weights += 1;
-    //         let qstate_avoid = qstate_avoid_for_agent(agent, &agents[other_i]);
-    //         let more_weights = q.avoid_values.get(&qstate_avoid);
-    //         if let Some(more_weights) = more_weights {
-    //             for (i, w) in more_weights.iter().enumerate() {
-    //                 weights[i] += w;
-    //             }
-    //         }
-    //     }
-    // }
-
     let q_target_vals = q.target_values.get(&qstate_target);
     if let Some(q_target_vals) = q_target_vals {
-        num_weights += 1;
-        for (i, &w) in q_target_vals.iter().enumerate() {
-            weights[i] += w;
+        let all_actions = Action::normal_actions();
+
+        let mut weight_i = 0;
+        for (select_i, &a) in select_actions.iter().enumerate() {
+            while all_actions[weight_i] != a {
+                weight_i += 1;
+            }
+            weights[select_i] += q_target_vals[weight_i];
+            weight_i += 1;
+        }
+    }
+    weights
+}
+
+fn q_avoid_weights(q: &mut QLearning, agents: &[Agent],
+                   agent_dists: &AgentDistanceTable,
+                   select_actions: &[Action], agent_i: usize) -> Vec<f32> {
+    let agent = &agents[agent_i];
+    let all_actions = Action::normal_actions();
+    let mut weights = vec![0.0; select_actions.len()];
+
+    let mut num_summed = 0;
+    for other_i in 0..agents.len() {
+        let dist = get_agent_1_dist(&agent_dists, agent_i, other_i);
+        if dist < C.state_avoid_dist {
+            num_summed += 1;
+            let qstate_avoid = qstate_avoid_for_agent(agent, &agents[other_i]);
+            let more_weights = q.avoid_values.get(&qstate_avoid);
+            if let Some(more_weights) = more_weights {
+                // put the weights into the correct place for the selected actions
+                let mut weight_i = 0;
+                for (select_i, &a) in select_actions.iter().enumerate() {
+                    while all_actions[weight_i] != a {
+                        weight_i += 1;
+                    }
+                    weights[select_i] += more_weights[weight_i];
+                    weight_i += 1;
+                }
+            }
         }
     }
 
-    if num_weights > 1 {
+    if num_summed >= 1 {
         for i in 0..weights.len() {
-            weights[i] /= num_weights as f32;
+            weights[i] /= num_summed as f32;
         }
+    }
+    return weights
+}
+
+fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
+                        agent_dists: &AgentDistanceTable,
+                        select_actions: &[Action], agent_i: usize) -> Vec<f32> {
+    let agent = &agents[agent_i];
+    if agent.habit_theory == 0.0 {
+        return vec![0.0; select_actions.len()];
+    }
+
+    let mut weights = q_target_weights(q, select_actions, agent);
+    let avoid_weights = q_avoid_weights(q, agents, agent_dists, select_actions, agent_i);
+
+    for i in 0..weights.len() {
+        weights[i] = (weights[i] + avoid_weights[i]) * agent.habit_theory;
     }
 
     weights
 }
 
-fn folk_theory_weights(_agents: &[Agent], _agent: &Agent) -> Vec<f32> {
-    let actions = Action::normal_actions();
-    vec![0.0; actions.len()]
+// #[derive(Clone, Eq)]
+// struct FolkSearchState {
+//
+// }
+//
+// impl PartialEq for FolkSearchState {
+//     fn eq(&self, other: &FolkSearchState) -> bool {
+//         self.0[..] == other.0[..]
+//         // let n_sections = MAP_SIZE / 32;
+//         // for i in 0..n_sections {
+//         //     let start_i = i * 32;
+//         //     let end_i = start_i + 32;
+//         //     if self.0[start_i..end_i] != other.0[start_i..end_i] {
+//         //         return false;
+//         //     }
+//         // }
+//         // return self.0[n_sections*32..] == other.0[n_sections*32..0];
+//     }
+// }
+//
+// impl Hash for FolkSearchState {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         self.0[..].hash(state);
+//     }
+// }
+//
+// struct MapSearchExpansion(i32);
+// impl Iterator for MapSearchExpansion {
+//     type Item = (FolkSearchState, i32);
+//     fn next(&mut self) -> Option<(FolkSearchState, i32)> {
+//         None
+//     }
+// }
+//
+// struct FolkSearchTraits;
+// impl SearchProblemTrait<FolkSearchState> for FolkSearchTraits {
+//     fn is_goal(&self, node: &SearchNode<FolkSearchState>) -> bool {
+//         node.state.0[0] == 0
+//     }
+//
+//     fn step_cost(&self, node: &SearchNode<FolkSearchState>, action: i32) -> f32 {
+//         action as f32
+//     }
+//
+//     fn ordering_cost(&self, node: &SearchNode<FolkSearchState>) -> f32 {
+//         node.path_cost
+//     }
+//
+//     fn expand_state(&self, node: &SearchNode<FolkSearchState>) -> Box<Iterator<Item = (FolkSearchState, i32)>> {
+//         Box::new(MapSearchExpansion(node.state.0[0] as i32))
+//     }
+// }
+//
+// fn create_map() {
+//     let mut p = create_search_problem::<FolkSearchState, PriorityQueue<SearchNode<FolkSearchState>>>
+//                                         (FolkSearchState([0; MAP_SIZE]), &FolkSearchTraits{}, true, true);
+//     {
+//         let result = tree_search(&mut p);
+//         if let Some(sol) = result {
+//             println!("Found solution with cost {:.2} at depth {} after expanding {} nodes", sol.path_cost, sol.depth, sol.get_expansion_count());
+//             return;
+//         }
+//     }
+//     println!("Falied to find solution after expanding {} nodes", p.get_expansion_count())
+// }
+
+fn folk_theory_weights(_agents: &[Agent], actions: &[Action], agent: &Agent) -> Vec<f32> {
+    let mut weights = vec![0.0; actions.len()];
+    if agent.folk_theory == 0.0 {
+        return weights;
+    }
+
+    weights
 }
 
-fn internalization_theory_weights(_agents: &[Agent], _agent: &Agent) -> Vec<f32> {
-    let actions = Action::normal_actions();
+fn internalization_theory_weights(_agents: &[Agent], actions: &[Action], _agent: &Agent) -> Vec<f32> {
     vec![0.0; actions.len()]
 }
 
 fn choice_restriction_theory_filter(_agents: &[Agent], _agent: &Agent, actions: &Vec<(Action, f32)>)
                                     -> Vec<(Action, f32)> {
     actions.clone()
+}
+
+fn get_possible_actions(agent: &Agent) -> Vec<Action> {
+    let mut actions = Vec::new();
+    // always possible
+    actions.push(Action::TurnLeft);
+    actions.push(Action::TurnRight);
+    let vel = agent.velocity;
+    if vel >= 0 && vel < C.max_forward_vel as i32 {
+        actions.push(Action::AccelerateForward);
+    }
+    if vel <= 0 && vel > C.max_forward_vel as i32 {
+        actions.push(Action::AccelerateBackward);
+    }
+    if vel != 0 {
+        actions.push(Action::Brake);
+    }
+    actions.push(Action::Nothing);
+
+    actions
 }
 
 fn choose_action(_map: &WorldMap, q: &mut QLearning,
@@ -1520,28 +1617,40 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         return Action::Frozen;
     }
 
-    let habit_w = habit_theory_weights(q, agents, agent_dists, agent_i);
-    let folk_w = folk_theory_weights(agents, agent);
-    let internal_w = internalization_theory_weights(agents, agent);
+    let actions = get_possible_actions(agent);
+
+    let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
+    let folk_w = folk_theory_weights(agents, &actions, agent);
+    let internal_w = internalization_theory_weights(agents, &actions, agent);
     let mut weights = habit_w;
     for i in 0..weights.len() {
         weights[i] += folk_w[i] + internal_w[i];
     }
 
-    let actions = Action::normal_actions();
     let choices = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
     let choices = choice_restriction_theory_filter(agents, agent, &choices);
 
+    let mut rng = rand::thread_rng();
+
+    // if we are a habit-theory agent, explore a new action first
+    let mut should_explore = false;
+    if agent.habit_theory != 0.0 {
+        let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
+        let n_actions = actions.len() as u32;
+        let explore_one_in = C.explore_one_in_min +
+                             (C.explore_one_in_max - C.explore_one_in_min) *
+                             (n_actions - unexplored_actions) / n_actions;
+        should_explore = rng.gen_weighted_bool(explore_one_in);
+    }
+
     let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
                                           |a, &c| if c.1 > a.1 { c } else { a });
+    if best_choice.1 == 0.0 {
+        should_explore = true;
+    }
 
-    let mut rng = rand::thread_rng();
-    if best_choice.1 == 0.0 || rng.gen_weighted_bool(EXPLORE_ONE_IN) {
-        let mut action = rng.gen();
-        while action == Action::Frozen {
-            action = rng.gen();
-        }
-        return action;
+    if should_explore {
+        return *rng.choose(&actions).unwrap();
     } else {
         if rng.gen_weighted_bool(10000) {
             println!("Made decision based on best q-value of {}", best_choice.1);
@@ -1575,16 +1684,18 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
             agent.pose.1 = (agent.pose.1 as f32 + rot_pt1.1 - rot_pt2.1 + 0.5).max(1.0) as u32;
         },
         Action::AccelerateForward => {
-            agent.velocity = (agent.velocity + 1).min(3);
+            agent.velocity = (agent.velocity + C.forward_accel as i32)
+                             .min(C.max_forward_vel as i32);
         },
         Action::AccelerateBackward => {
-            agent.velocity = (agent.velocity - 1).max(-3);
+            agent.velocity = (agent.velocity - C.backward_accel as i32)
+                             .max(-(C.max_backward_vel as i32));
         },
         Action::Brake => {
-            if agent.velocity.abs() <= 2 {
+            if agent.velocity.abs() <= C.brake_power as i32 {
                 agent.velocity = 0;
             } else {
-                agent.velocity += if agent.velocity > 0 { -2 } else { 2 };
+                agent.velocity += if agent.velocity > 0 { -(C.brake_power as i32) } else { C.brake_power as i32 };
             }
         },
         Action::Nothing => {
@@ -1893,7 +2004,7 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
                                 { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
         if dist <= building_margin {
             agent.on_map = false;
-            agent.health = (agent.health + HEAL_REWARD).min(99);
+            agent.health = (agent.health + C.heal_reward).min(99);
             trips_completed.push(i);
         }
     }
@@ -1901,45 +2012,56 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
     trips_completed
 }
 
-fn update_qtables(q: &mut QLearning,
-                  q_targets: &Vec<QStateTarget>, q_avoids: &Vec<Vec<QStateAvoid>>,
-                  actions: &[Action], new_qs: &[Option<f32>]) {
-    let normal_actions = Action::normal_actions();
+fn update_q_target_table(q: &mut QLearning, q_targets: &Vec<QStateTarget>,
+                         actions: &[Action], new_qs: &[Option<f32>]) {
+    let all_actions = Action::normal_actions();
     for (i, &new_q) in new_qs.iter().enumerate() {
-        if new_q.is_none() {
-            continue;
-        }
-        let new_q = new_q.unwrap();
-
-        let action_i = normal_actions.iter().position(|&a| a == actions[i]);
-        if action_i.is_none() {
-            continue;
-        }
-        let action_i = action_i.unwrap();
+        let new_q = if let Some(new_q) = new_q { new_q } else { continue };
+        let action_i = all_actions.iter().position(|&a| a == actions[i]);
+        let action_i = if let Some(action_i) = action_i { action_i } else { continue };
 
         if !q.target_values.contains_key(&q_targets[i]) {
-            q.target_values.insert(q_targets[i], vec![0.0; normal_actions.len()]);
+            q.target_values.insert(q_targets[i], vec![0.0; all_actions.len()]);
         }
         let mut q_target = q.target_values.get_mut(&q_targets[i]).unwrap();
         let old_val = q_target[action_i];
-        let new_val = (1.0 - Q_LEARN_RATE) * old_val + Q_LEARN_RATE * new_q;
+        let new_val = (1.0 - C.q_learn_rate) * old_val + C.q_learn_rate * new_q;
         q_target[action_i] = new_val;
-        // println!("{:?} has {:?}", &q_targets[i], q_target);
-
-        // let q_avoids = &q_avoids[i];
-        // for &q_avoid in q_avoids {
-        //     if !q.avoid_values.contains_key(&q_avoid) {
-        //         q.avoid_values.insert(q_avoid, vec![0.0; normal_actions.len()]);
-        //     }
-        //     let mut q_avoid_val = q.avoid_values.get_mut(&q_avoid).unwrap();
-        //     let old_val = q_avoid_val[action_i];
-        //     let new_val = (1.0 - Q_LEARN_RATE) * old_val + Q_LEARN_RATE * new_q;
-        //     q_avoid_val[action_i] = new_val;
-        // }
     }
 }
 
-fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> Vec<Vec<QStateAvoid>> {
+fn update_q_avoid_tables(q: &mut QLearning, q_avoids: &Vec<Vec<(usize, QStateAvoid)>>,
+                         collisions: &[Collision], actions: &[Action], base_qs: &[Option<f32>]) {
+    let all_actions = Action::normal_actions();
+    for (i, &base_q) in base_qs.iter().enumerate() {
+        let base_q = if let Some(base_q) = base_q { base_q } else { continue };
+        let action_i = all_actions.iter().position(|&a| a == actions[i]);
+        let action_i = if let Some(action_i) = action_i { action_i } else { continue };
+
+        let q_avoids = &q_avoids[i];
+        for &(other_i, q_avoid) in q_avoids {
+            let mut new_q = base_q;
+            for c in collisions.iter() {
+                if c.agent1_i == i && c.agent2_i == other_i {
+                    new_q -= C.damage_coef * c.damage1 as f32;
+                }
+                if c.agent2_i == i && c.agent1_i == other_i {
+                    new_q -= C.damage_coef * c.damage2 as f32;
+                }
+            }
+
+            if !q.avoid_values.contains_key(&q_avoid) {
+                q.avoid_values.insert(q_avoid, vec![0.0; all_actions.len()]);
+            }
+            let mut q_avoid_val = q.avoid_values.get_mut(&q_avoid).unwrap();
+            let old_val = q_avoid_val[action_i];
+            let new_val = (1.0 - C.q_learn_rate) * old_val + C.q_learn_rate * new_q;
+            q_avoid_val[action_i] = new_val;
+        }
+    }
+}
+
+fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> Vec<Vec<(usize, QStateAvoid)>> {
     let mut q_avoids = Vec::new();
     for i in 0..agents.len() {
         let mut agent_avoids = Vec::new();
@@ -1950,9 +2072,9 @@ fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> V
         }
         for j in 0..agents.len() {
             let dist = get_agent_1_dist(&agent_dists, i, j);
-            if dist < STATE_AVOID_DIST {
+            if dist < C.state_avoid_dist {
                 let q_avoid = qstate_avoid_for_agent(agent, &agents[j]);
-                agent_avoids.push(q_avoid);
+                agent_avoids.push((j, q_avoid));
             }
         }
         q_avoids.push(agent_avoids);
@@ -1960,15 +2082,34 @@ fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> V
     q_avoids
 }
 
-fn calc_best_q_value(q: &mut QLearning, agents: &[Agent],
-                     agent_dists: &AgentDistanceTable, agent_i: usize) -> Option<f32> {
+fn calc_best_q_value(q: &mut QLearning, for_target: bool, agents: &[Agent],
+                            agent_dists: &AgentDistanceTable, agent_i: usize) -> Option<f32> {
     let agent = &agents[agent_i];
-    if !agent.on_map || agent.frozen_steps > 0 || agent.kind == AgentKind::Obstacle {
+    if !agent.on_map || agent.kind == AgentKind::Obstacle {
         return None;
     }
-    let weights = habit_theory_weights(q, agents, agent_dists, agent_i);
+    if agent.health == 0 {
+        // will not continue from this state, so cannot have reward from acting in it
+        return Some(0.0)
+    }
+    let actions = get_possible_actions(agent);
+    let weights = if for_target {
+        q_target_weights(q, &actions, agent)
+    } else {
+        q_avoid_weights(q, agents, agent_dists, &actions, agent_i)
+    };
     let max_w = weights.iter().fold(f32::MIN, |a, &b| a.max(b));
     Some(max_w)
+}
+
+fn calc_best_q_target_value(q: &mut QLearning, agents: &[Agent],
+                            agent_dists: &AgentDistanceTable, agent_i: usize) -> Option<f32> {
+    calc_best_q_value(q, true, agents, agent_dists, agent_i)
+}
+
+fn calc_best_q_avoid_value(q: &mut QLearning, agents: &[Agent],
+                            agent_dists: &AgentDistanceTable, agent_i: usize) -> Option<f32> {
+    calc_best_q_value(q, false, agents, agent_dists, agent_i)
 }
 
 fn add_q_reward(new_qs: &mut Vec<Option<f32>>, agent_is: &[usize], score: f32) {
@@ -2016,20 +2157,25 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
 
     let actions = update_agents(map, q, agents, &agent_dists); // here
     let collisions = find_collisions(agents);
-    resolve_collisions(agents, &collisions);
     stats.collisions += collisions.len() as u32;
 
-    let agent_dists = compute_agent_1_dists(&agents);
-    let mut new_qs = (0..agents.len()).map(|i|
-                            Some(Q_DISCOUNT * calc_best_q_value(q, agents, &agent_dists, i)?))
-                           .collect::<Vec<_>>();
+    resolve_collisions(agents, &collisions);
 
+    let agent_dists = compute_agent_1_dists(&agents);
+    let mut new_target_qs = (0..agents.len()).map(|i| Some(C.q_discount *
+                                    calc_best_q_target_value(q, agents, &agent_dists, i)?))
+                            .collect::<Vec<_>>();
+    let base_avoid_qs = (0..agents.len()).map(|i| Some(C.q_discount *
+                                    calc_best_q_avoid_value(q, agents, &agent_dists, i)?))
+                            .collect::<Vec<_>>();
+
+    //  collision data is applied more precisely for the q-avoid tables, so it is done separately
     for c in collisions.iter() {
-        if let Some(val) = new_qs[c.agent1_i] {
-            new_qs[c.agent1_i] = Some(val - c.damage1 as f32);
+        if let Some(val) = new_target_qs[c.agent1_i] {
+            new_target_qs[c.agent1_i] = Some(val - C.damage_coef * c.damage1 as f32);
         }
-        if let Some(val) = new_qs[c.agent2_i] {
-            new_qs[c.agent2_i] = Some(val - c.damage2 as f32);
+        if let Some(val) = new_target_qs[c.agent2_i] {
+            new_target_qs[c.agent2_i] = Some(val - C.damage_coef * c.damage2 as f32);
         }
     }
 
@@ -2047,19 +2193,21 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
     //         std::process::abort();
     //     }
     // }
-    add_q_reward(&mut new_qs, &trips_completed, 1e4);
+    add_q_reward(&mut new_target_qs, &trips_completed, C.trip_reward);
 
     let dead = find_dead_agents(agents);
     stats.dead += dead.len() as u32;
-    // add_q_reward(&mut new_qs, &dead, -100.0);
+    // add_q_reward(&mut new_target_qs, &dead, -100.0);
+    // add_q_reward(&mut base_avoid_qs, &dead, -100.0);
 
     // constant for the timestep
-    // let active_agents = (0..agents.len()).filter(|&i|
-    //                             agents[i].on_map && agents[i].kind != AgentKind::Obstacle)
-    //                             .collect::<Vec<_>>();
-    // add_q_reward(&mut new_qs, &active_agents, -0.1);
+    let active_agents = (0..agents.len()).filter(|&i|
+                                agents[i].on_map && agents[i].kind != AgentKind::Obstacle)
+                                .collect::<Vec<_>>();
+    add_q_reward(&mut new_target_qs, &active_agents, -1.0);
 
-    update_qtables(q, &prior_q_targets, &prior_q_avoids, &actions, &new_qs);
+    update_q_target_table(q, &prior_q_targets, &actions, &new_target_qs);
+    update_q_avoid_tables(q, &prior_q_avoids, &collisions, &actions, &base_avoid_qs);
 
     replace_dead_agents(agents, &dead);
     replenish_pedestrians(map, agents);
@@ -2090,6 +2238,9 @@ fn q_diagnostic(q: &QLearning) {
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
             let mut best = f32::MIN;
+            let mut worst = f32::MAX;
+            let mut accum = 0.0;
+            let mut accum_n = 0;
             for theta in 0..TWO_PI_INCS {
                 for vel in -3..4 {
                     let q_targ = QStateTarget {x, y, theta, vel, destination_building_i: 0 };
@@ -2099,13 +2250,22 @@ fn q_diagnostic(q: &QLearning) {
                     }
                     let vals = vals.unwrap();
                     for &val in vals {
+                        accum += val;
+                        accum_n += 1;
                         if val > best {
                             best = val;
+                        }
+                        if val < worst {
+                            worst = val;
                         }
                     }
                 }
             }
-            write!(f, "{}, ", best).unwrap();
+            if accum_n == 0 {
+                write!(f, "{}, ", f32::MIN).unwrap();
+            } else {
+                write!(f, "{}, ", 0.0 * worst + 0.0 * accum / accum_n as f32 + 1.0 * best).unwrap();
+            }
         }
         writeln!(f, "").unwrap();
     }
@@ -2148,8 +2308,8 @@ fn main() {
                 q_diagnostic(&q);
             }
             if run_slow {
-                thread::sleep(std::time::Duration::from_millis(15));
-            } else if (iter % 400) == 0 {
+                thread::sleep(std::time::Duration::from_millis(C.slow_step_ms));
+            } else if (iter % C.fast_steps_per_update) == 0 {
                 thread::sleep(std::time::Duration::from_millis(1));
                 iter = 0;
             }
