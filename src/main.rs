@@ -1356,17 +1356,17 @@ impl Action {
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 struct QStateAvoid {
     vel: i32,
-    // is_pedestrian: bool,
+    is_pedestrian: bool,
     // other_pedestrian: bool,
     other_x: i32,
     other_y: i32,
-    other_theta: u32,
-    other_vel: i32,
+    // other_theta: u32,
+    // other_vel: i32,
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 struct QStateTarget {
-    // is_pedestrian: bool,
+    is_pedestrian: bool,
     x: u32,
     y: u32,
     theta: u32,
@@ -1378,6 +1378,12 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
     let (sin_a, cos_a) = fast_sin_cos(-(agent.pose.2 as i32));
     let dx = (other.pose.0 as f32) - (agent.pose.0 as f32);
     let dy = (other.pose.1 as f32) - (agent.pose.1 as f32);
+
+    // account for the size of the (main) agent, which is assumed to be as if at theta=0
+    let (a_width, a_length) = (agent.width as f32, agent.length as f32);
+    let dx = if dx > 0.0 { if a_width >= dx { 0.0 } else { dx - a_width} } else { dx };
+    let dy = if dy > 0.0 { if a_length >= dy { 0.0 } else { dy - a_length} } else { dy };
+
     let rel_x = cos_a * dx + sin_a * dy;
     let rel_y = -sin_a * dx + cos_a * dy;
     let rel_x = rel_x.round() as i32;
@@ -1396,19 +1402,19 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
         if ly.abs() < hy.abs() { ly } else { hy }
     };
     QStateAvoid {
-                  // is_pedestrian: agent.kind == AgentKind::Pedestrian,
+                  is_pedestrian: agent.kind == AgentKind::Pedestrian,
                   // other_pedestrian: other.kind == AgentKind::Pedestrian,
                   vel: agent.velocity,
                   other_x: rel_x,
                   other_y: rel_y,
-                  other_theta: rel_theta,
-                  other_vel: other.velocity,
+                  // other_theta: rel_theta,
+                  // other_vel: other.velocity,
                 }
 }
 
 fn qstate_target_for_agent(agent: &Agent) -> QStateTarget {
     QStateTarget {
-                   // is_pedestrian: agent.kind == AgentKind::Pedestrian,
+                   is_pedestrian: agent.kind == AgentKind::Pedestrian,
                    x: agent.pose.0, y: agent.pose.1, theta: agent.pose.2, vel: agent.velocity,
                    destination_building_i: agent.destination_building_i,
                  }
@@ -1586,12 +1592,11 @@ fn choice_restriction_theory_filter(_agents: &[Agent], _agent: &Agent, actions: 
     actions.clone()
 }
 
-fn get_possible_actions(agent: &Agent) -> Vec<Action> {
+fn get_possible_actions_by(vel: i32) -> Vec<Action> {
     let mut actions = Vec::new();
     // always possible
     actions.push(Action::TurnLeft);
     actions.push(Action::TurnRight);
-    let vel = agent.velocity;
     if vel >= 0 && vel < C.max_forward_vel as i32 {
         actions.push(Action::AccelerateForward);
     }
@@ -1604,6 +1609,10 @@ fn get_possible_actions(agent: &Agent) -> Vec<Action> {
     actions.push(Action::Nothing);
 
     actions
+}
+
+fn get_possible_actions(agent: &Agent) -> Vec<Action> {
+    get_possible_actions_by(agent.velocity)
 }
 
 fn choose_action(_map: &WorldMap, q: &mut QLearning,
@@ -2241,15 +2250,23 @@ fn q_diagnostic(q: &QLearning) {
             let mut worst = f32::MAX;
             let mut accum = 0.0;
             let mut accum_n = 0;
-            for theta in 0..TWO_PI_INCS {
-                for vel in -3..4 {
-                    let q_targ = QStateTarget {x, y, theta, vel, destination_building_i: 0 };
+            for vel in -3..4 {
+                let possible_actions = get_possible_actions_by(vel);
+
+                for theta in 0..TWO_PI_INCS {
+                    let q_targ = QStateTarget {x, y, theta, vel, destination_building_i: 0, is_pedestrian: false };
                     let vals = q.target_values.get(&q_targ);
                     if vals.is_none() {
                         continue;
                     }
+
                     let vals = vals.unwrap();
-                    for &val in vals {
+                    for (i, &val) in vals.iter().enumerate() {
+                        let val_action = Action::normal_actions()[i];
+                        if possible_actions.iter().find(|&&a| a == val_action).is_none() {
+                            continue;
+                        }
+
                         accum += val;
                         accum_n += 1;
                         if val > best {
@@ -2269,7 +2286,68 @@ fn q_diagnostic(q: &QLearning) {
         }
         writeln!(f, "").unwrap();
     }
+}
 
+fn q_avoid_diagnostic(q: &QLearning) {
+    let mut f_x = match fs::File::create("q_avoid_diag_x.csv") {
+        Ok(f_x) => f_x,
+        Err(e) => panic!("file error: {}", e),
+    };
+    let mut f_y = match fs::File::create("q_avoid_diag_y.csv") {
+        Ok(f_y) => f_y,
+        Err(e) => panic!("file error: {}", e),
+    };
+
+    for other_y in -20..20 {
+        for other_x in -20..20 {
+            let mut best = f32::MIN;
+            let mut best_action_i = 0;
+            let mut best_vel = 0;
+            let mut acc_val = 0.0;
+            let mut acc_count = 0;
+            for vel in -3..4 {
+                let possible_actions = get_possible_actions_by(vel);
+                let q_avoid = QStateAvoid {vel, other_x, other_y, is_pedestrian: false };
+                let vals = q.avoid_values.get(&q_avoid);
+                if vals.is_none() {
+                    continue;
+                }
+                let vals = vals.unwrap();
+                for (i, &val) in vals.iter().enumerate() {
+                    let val_action = Action::normal_actions()[i];
+                    if possible_actions.iter().find(|&&a| a == val_action).is_none() {
+                        continue;
+                    }
+
+                    if val > best {
+                        best = val;
+                        best_action_i = i;
+                        best_vel = vel;
+                        acc_val += val.abs();
+                        acc_count += 1;
+                    }
+                }
+            }
+            let best_action = Action::normal_actions()[best_action_i];
+            let new_direction = match best_action {
+                Action::TurnLeft => if best_vel < 0 { consts::PI + THETA_PER_INC} else { THETA_PER_INC },
+                Action::TurnRight => if best_vel < 0 { -THETA_PER_INC} else { consts::PI - THETA_PER_INC },
+                Action::AccelerateForward => 0.0,
+                Action::AccelerateBackward => consts::PI,
+                Action::Brake => if best_vel < 0 { 0.0 } else { consts::PI },
+                Action::Nothing => if best_vel < 0 { consts::PI } else { 0.0 },
+                Action::Frozen => 0.0,
+            };
+
+            let x_part = -new_direction.sin() * acc_val / acc_count as f32;
+            let y_part = new_direction.cos() * acc_val / acc_count as f32;
+
+            write!(f_x, "{}, ", x_part).unwrap();
+            write!(f_y, "{}, ", y_part).unwrap();
+        }
+        writeln!(f_x, "").unwrap();
+        writeln!(f_y, "").unwrap();
+    }
 }
 
 fn main() {
@@ -2306,6 +2384,7 @@ fn main() {
             if io_receiver.try_recv().is_ok() {
                 run_slow = !run_slow;
                 q_diagnostic(&q);
+                q_avoid_diagnostic(&q);
             }
             if run_slow {
                 thread::sleep(std::time::Duration::from_millis(C.slow_step_ms));

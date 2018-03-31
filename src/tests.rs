@@ -20,6 +20,20 @@ impl Hash for Pose {
 }
 
 #[test]
+fn test_q_avoid() {
+    let agent1 = Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+    let agent2 = Agent{pose: (20, 20, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+
+    let qavoid_1 = qstate_avoid_for_agent(&agent1, &agent2);
+    assert_eq!(qavoid_1.other_x, 6);
+    assert_eq!(qavoid_1.other_y, 0);
+
+    let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
+    assert_eq!(qavoid_2.other_x, -6);
+    assert_eq!(qavoid_2.other_y, 0);
+}
+
+#[test]
 fn test_precomputed_sin_cos() {
     let range = TWO_PI_INCS as i32;
     for t in -range..range {
@@ -264,7 +278,7 @@ fn test_spawn_vehicle() {
 
         // replenish_pedestrians(&map, &mut agents);
 
-        for _ in 0..VEHICLE_N {
+        for _ in 0..C.vehicle_n {
             let agent_i = draw_off_map_agent_i(&mut agents, AgentKind::Pedestrian);
             if agent_i.is_none() {
                 continue; // no agents left to draw
