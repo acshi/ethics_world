@@ -31,6 +31,17 @@ fn test_q_avoid() {
     let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
     assert_eq!(qavoid_2.other_x, -6);
     assert_eq!(qavoid_2.other_y, 0);
+
+    let agent1 = Agent{pose: (10, 10, PI_OVER_TWO_INCS), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+    let agent2 = Agent{pose: (20, 20, PI_OVER_TWO_INCS), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+
+    let qavoid_1 = qstate_avoid_for_agent(&agent1, &agent2);
+    assert_eq!(qavoid_1.other_x, -6);
+    assert_eq!(qavoid_1.other_y, 0);
+
+    let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
+    assert_eq!(qavoid_2.other_x, 6);
+    assert_eq!(qavoid_2.other_y, 0);
 }
 
 #[test]

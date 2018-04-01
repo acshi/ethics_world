@@ -566,7 +566,7 @@ fn difference<T>(a: T, b: T) -> T
     if a > b { a - b } else  { b - a }
 }
 
-fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
+fn pose_size_to_bounding_rect_i32(p: (i32, i32, i32), size: (i32, i32))
                               -> BoundingRect {
     let (x, y, t) = p;
     let t = t as i32;
@@ -582,6 +582,12 @@ fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
     let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).ceil() as i32;
 
     ((min_x, min_y), (max_x, max_y))
+}
+
+fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
+                              -> BoundingRect {
+    pose_size_to_bounding_rect_i32((p.0 as i32, p.1 as i32, p.2 as i32),
+                                   (size.0 as i32, size.1 as i32))
 }
 
 fn create_bounding_rect_table_for_size(size: (u32, u32)) -> Vec<BoundingRect> {
@@ -1379,18 +1385,34 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
     let dx = (other.pose.0 as f32) - (agent.pose.0 as f32);
     let dy = (other.pose.1 as f32) - (agent.pose.1 as f32);
 
-    // account for the size of the (main) agent, which is assumed to be as if at theta=0
     let (a_width, a_length) = (agent.width as f32, agent.length as f32);
-    let dx = if dx > 0.0 { if a_width >= dx { 0.0 } else { dx - a_width} } else { dx };
-    let dy = if dy > 0.0 { if a_length >= dy { 0.0 } else { dy - a_length} } else { dy };
+
+    let (sin_o, cos_o) = fast_sin_cos(other.pose.2 as i32);
+    let (o_width, o_length) = (other.width as f32, other.length as f32);
+    // rotate the other's size by its own theta and then back by the agent's
+    // so we can get it as if the (main) agent is at theta=0
+    // and also rotate the vector (dx, dy) by the agent's theta for the same purpose
+    let (o_width, o_length) = (cos_o * o_width + sin_o * o_length,
+                               -sin_o * o_width + cos_o * o_length);
+    let (o_width, o_length) = (cos_a * o_width + sin_a * o_length,
+                               -sin_a * o_width + cos_a * o_length);
+    let (o_width, o_length) = (o_width.round() as i32, o_length.round() as i32);
 
     let rel_x = cos_a * dx + sin_a * dy;
     let rel_y = -sin_a * dx + cos_a * dy;
+
+    // account for the size of the (main) agent, which is assumed to be as if at theta=0
+    let rel_x = if rel_x > 0.0 {
+                    if a_width >= rel_x { 0.0 } else { rel_x - a_width} } else { rel_x };
+    let rel_y = if rel_y > 0.0 {
+                    if a_length >= rel_y { 0.0 } else { rel_y - a_length} } else { rel_y };
+
     let rel_x = rel_x.round() as i32;
     let rel_y = rel_y.round() as i32;
+
     let rel_theta = (other.pose.2 + TWO_PI_INCS - agent.pose.2) % TWO_PI_INCS;
-    let ((lx, ly), (hx, hy)) = pose_size_to_bounding_rect((0, 0, rel_theta),
-                                                          (other.width, other.length));
+    let ((lx, ly), (hx, hy)) = pose_size_to_bounding_rect_i32((0, 0, 0),
+                                                          (o_width, o_length));
     let ((lx, ly), (hx, hy)) = ((lx as i32 + rel_x,
                                 ly as i32 + rel_y),
                                 (hx as i32 + rel_x,
