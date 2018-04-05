@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 
 # cat out.txt | grep Collision! | awk '{ print $3, $5, $7, $9, $11, $13, $15, $17, $19, $21 }' > out.csv
 
-data_x = np.genfromtxt("q_avoid_diag_x.csv", delimiter=",", usecols=range(19))
-data_y = np.genfromtxt("q_avoid_diag_y.csv", delimiter=",", usecols=range(19))
+data_x = np.genfromtxt("q_avoid_diag_x.csv", delimiter=",", usecols=range(21))
+data_y = np.genfromtxt("q_avoid_diag_y.csv", delimiter=",", usecols=range(21))
 scale = np.sqrt(np.power(data_x, 2) + np.power(data_y, 2))
 plt.quiver(data_x / scale, data_y / scale, width = 0.002, minlength=1.5) #, scale = 1000)
 plt.show()

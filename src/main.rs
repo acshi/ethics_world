@@ -84,6 +84,7 @@ struct ConfSettings {
     state_avoid_dist: u32,
     explore_one_in_max: u32,
     explore_consecutive_limit: u32,
+    full_explore_until: u32,
     q_learn_rate: f32,
     q_discount: f32,
     damage_coef: f32,
@@ -99,6 +100,7 @@ struct ConfSettings {
 
     fast_steps_per_update: u32,
     slow_step_ms: u32,
+    fast_steps_update_q_empties: u32,
 }
 
 lazy_static! {
@@ -1482,6 +1484,7 @@ fn qstate_target_for_agent(agent: &Agent) -> QStateTarget {
 struct QLearning {
     avoid_values: FnvHashMap<QStateAvoid, Vec<f32>>,
     target_values: FnvHashMap<QStateTarget, Vec<f32>>,
+    avoid_empties: u32,
 }
 
 impl Default for QLearning {
@@ -1489,6 +1492,7 @@ impl Default for QLearning {
         QLearning {
             avoid_values: FnvHashMap::default(),
             target_values: FnvHashMap::default(),
+            avoid_empties: 0,
         }
     }
 }
@@ -1705,81 +1709,82 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
 
     let mut rng = repeatable_rand(); //rand::thread_rng();
 
-    let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
-                                          |a, &c| if c.1 > a.1 { c } else { a });
-    let mut action_choice = best_choice.0;
+    // let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
+    //                                       |a, &c| if c.1 > a.1 { c } else { a });
+    // let mut action_choice = best_choice.0;
+    // // if we are a habit-theory agent, prefer exploring a new action first
+    // if agent.habit_theory != 0.0 {
+    //     let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).collect::<Vec<_>>();
+    //     if unexplored_actions.len() == 0 {
+    //         if rng.gen_weighted_bool(C.explore_one_in_max) {
+    //             agent.explore_actions += 1;
+    //             if agent.explore_actions <= C.explore_consecutive_limit {
+    //                 action_choice = *rng.choose(&actions).unwrap();
+    //                 if rng.gen_weighted_bool(10000) {
+    //                     println!("Already explored, but choose a random action");
+    //                 }
+    //             } else {
+    //                 agent.explore_actions = 0;
+    //                 if rng.gen_weighted_bool(10000) {
+    //                     println!("Choose best action to keep from exploring too much in a row");
+    //                 }
+    //             }
+    //         } else {
+    //             agent.explore_actions = 0;
+    //             if rng.gen_weighted_bool(10000) {
+    //                 println!("Choose best action");
+    //             }
+    //         }
+    //     } else {
+    //         action_choice = (*rng.choose(&unexplored_actions).unwrap()).0;
+    //         if rng.gen_weighted_bool(10000) {
+    //             println!("Choice random unexplored action");
+    //         }
+    //     }
+    // }
+    // action_choice
+
     // if we are a habit-theory agent, prefer exploring a new action first
+    let mut should_explore = false;
     if agent.habit_theory != 0.0 {
-        let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).collect::<Vec<_>>();
-        if unexplored_actions.len() == 0 {
-            if rng.gen_weighted_bool(C.explore_one_in_max) {
+        // let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
+        // let n_actions = actions.len() as u32;
+        // let explore_one_in = 1 +
+        //                      (C.explore_one_in_max - 1) *
+        //                      (n_actions - unexplored_actions) / n_actions;
+        if q.avoid_empties > C.full_explore_until {
+            should_explore = true;
+        } else {
+            should_explore = rng.gen_weighted_bool(C.explore_one_in_max);
+            if should_explore {
                 agent.explore_actions += 1;
-                if agent.explore_actions <= C.explore_consecutive_limit {
-                    action_choice = *rng.choose(&actions).unwrap();
-                    if rng.gen_weighted_bool(10000) {
-                        println!("Already explored, but choose a random action");
-                    }
-                } else {
+                if agent.explore_actions > C.explore_consecutive_limit {
+                    should_explore = false;
                     agent.explore_actions = 0;
-                    if rng.gen_weighted_bool(10000) {
-                        println!("Choose best action to keep from exploring too much in a row");
-                    }
                 }
             } else {
                 agent.explore_actions = 0;
-                if rng.gen_weighted_bool(10000) {
-                    println!("Choose best action");
-                }
-            }
-        } else {
-            action_choice = (*rng.choose(&unexplored_actions).unwrap()).0;
-            if rng.gen_weighted_bool(10000) {
-                println!("Choice random unexplored action");
             }
         }
     }
-    action_choice
-    //
-    // // if we are a habit-theory agent, prefer exploring a new action first
-    // let mut should_explore = false;
-    // if agent.habit_theory != 0.0 {
-    //     let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
-    //     let n_actions = actions.len() as u32;
-    //     let explore_one_in = 1 +
-    //                          (C.explore_one_in_max - 1) *
-    //                          (n_actions - unexplored_actions) / n_actions;
-    //     should_explore = rng.gen_weighted_bool(explore_one_in);
-    //     if should_explore && explore_one_in == C.explore_one_in_max {
-    //         agent.explore_actions += 1;
-    //         if agent.explore_actions > 3 {
-    //             should_explore = false;
-    //             agent.explore_actions = 0;
-    //         }
-    //         // if agent.explore_actions > 3 {
-    //         //     println!("{} consecutive explores", agent.explore_actions);
-    //         // }
-    //     } else {
-    //         agent.explore_actions = 0;
-    //     }
+
+    let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
+                                          |a, &c| if c.1 > a.1 { c } else { a });
+    // if best_choice.1 == 0.0 {
+    //     should_explore = true;
     // }
-    //
-    // let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
-    //                                       |a, &c| if c.1 > a.1 { c } else { a });
-    // // if best_choice.1 == 0.0 {
-    // //     should_explore = true;
-    // // }
-    //
-    // if should_explore {
-    //     if rng.gen_weighted_bool(10000) {
-    //         println!("Made decision randomly");
-    //     }
-    //     return *rng.choose(&actions).unwrap();
-    // } else {
-    //     if rng.gen_weighted_bool(10000) {
-    //         println!("Made decision based on best q-value of {}", best_choice.1);
-    //     }
-    //     return best_choice.0;
-    // }
+
+    if should_explore {
+        if rng.gen_weighted_bool(10000) {
+            println!("Made decision randomly");
+        }
+        return *rng.choose(&actions).unwrap();
+    } else {
+        if rng.gen_weighted_bool(10000) {
+            println!("Made decision based on best q-value of {}", best_choice.1);
+        }
+        return best_choice.0;
+    }
 }
 
 fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
@@ -2407,6 +2412,41 @@ fn q_diagnostic(q: &QLearning) {
     }
 }
 
+fn q_avoid_count_empties(q: &QLearning) -> u32 {
+    let mut empties = 0;
+
+    let avoid_dist = C.state_avoid_dist as i32; // -1 because we use less than this dist.
+    for other_y in -avoid_dist..(avoid_dist + 1) {
+        for other_x in -avoid_dist..(avoid_dist + 1) {
+            if other_y.abs() + other_x.abs() > avoid_dist {
+                continue;
+            }
+            for vel in -3..-2 {//-3..4 {
+                let possible_actions = get_possible_actions_by(vel);
+                let q_avoid = QStateAvoid {vel, other_x, other_y, is_pedestrian: false };
+                let vals = q.avoid_values.get(&q_avoid);
+                if vals.is_none() {
+                    empties += possible_actions.len() as u32;
+                    continue;
+                }
+                let vals = vals.unwrap();
+                for (i, &val) in vals.iter().enumerate() {
+                    let val_action = Action::normal_actions()[i];
+                    if possible_actions.iter().find(|&&a| a == val_action).is_none() {
+                        continue;
+                    }
+
+                    if val == 0.0 {
+                        empties += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("Currently at {} empties!", empties);
+    empties
+}
+
 fn q_avoid_diagnostic(q: &QLearning) {
     let mut f_x = match fs::File::create("q_avoid_diag_x.csv") {
         Ok(f_x) => f_x,
@@ -2521,15 +2561,22 @@ fn main() {
 
     let thread_state = state.clone();
     let mut q = QLearning::default();
+    q.avoid_empties = q_avoid_count_empties(&q);
+
     let mut iter = 0;
     let mut time_step = 0;
     let mut run_slow = false;
+    let mut simulation_running = true;
     thread::spawn(move || {
         loop {
             if io_receiver.try_recv().is_ok() {
                 run_slow = !run_slow;
                 q_diagnostic(&q);
                 q_avoid_diagnostic(&q);
+                println!("On timestep {}k", time_step / 1000);
+            }
+            if !simulation_running {
+                continue;
             }
             if run_slow {
                 thread::sleep(std::time::Duration::from_millis(C.slow_step_ms as u64));
@@ -2544,9 +2591,13 @@ fn main() {
             run_timestep(&thread_state.map, &mut q,
                          &mut thread_state.agents, &mut thread_state.stats);
 
+            if (time_step % C.fast_steps_update_q_empties) == 0 {
+                q.avoid_empties = q_avoid_count_empties(&q);
+            }
+
             if time_step >= C.timestep_limit {
-                println!("Completed {} timsteps. Stopping simulation.", iter);
-                return;
+                println!("Completed {} timesteps. Stopping simulation.", time_step);
+                simulation_running = false;
             }
         }
     });
