@@ -3,7 +3,7 @@ pedestrian_n = 0 # those on map at one time
 vehicle_n = 1
 
 # for repeatable testing
-timestep_limit = 5000000
+timestep_limit = 6000000
 
 # for the MDP/Q-Learning processses
 state_avoid_dist = 10
@@ -13,10 +13,19 @@ explore_consecutive_limit = 1
 # of the q avoid state table. So this value will depend highly on state_avoid_dist
 # full exploration fills the table the fastest, but obviously is completely dumb!
 full_explore_until = 950
-q_learn_rate = 0.2
+q_learn_rate = 0.3
 q_discount = 0.95
 trip_reward = 100
-damage_coef = 0
+damage_coef = 3
+# we use a sort of "simulated annealing" to affect the soft-max probabilistic
+# best choice. damage_coef effectively will be divided by the anneal factor when
+# the number of zero entries in the  q-avoid-table is above the starting number.
+# when it reaches the end number then the damage_coef is as specified above.
+anneal_factor = 12
+anneal_start = 800
+anneal_end = 300
+# when the timstep reaches this, reset all death, etc counters to 0.
+reset_counters_at_timestep = 5000000
 
 forward_accel = 1
 backward_accel = 1

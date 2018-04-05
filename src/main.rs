@@ -87,8 +87,12 @@ struct ConfSettings {
     full_explore_until: u32,
     q_learn_rate: f32,
     q_discount: f32,
-    damage_coef: f32,
     trip_reward: f32,
+    damage_coef: f32,
+    anneal_factor: f32,
+    anneal_start: u32,
+    anneal_end: u32,
+    reset_counters_at_timestep: u32,
 
     forward_accel: u32,
     backward_accel: u32,
@@ -549,7 +553,7 @@ impl serde::Serialize for Agent {
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 struct WorldStats {
     collisions: u32,
-    dead: u32,
+    deaths: u32,
     trips_completed: u32,
 }
 
@@ -1768,8 +1772,8 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         }
     }
 
-    let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
-                                          |a, &c| if c.1 > a.1 { c } else { a });
+    // let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
+    //                                       |a, &c| if c.1 > a.1 { c } else { a });
     // if best_choice.1 == 0.0 {
     //     should_explore = true;
     // }
@@ -1780,10 +1784,30 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         }
         return *rng.choose(&actions).unwrap();
     } else {
+
+        let anneal_start_end = (C.anneal_start - C.anneal_end) as f32;
+        let mult_factor = (C.anneal_factor - 1.0) / anneal_start_end;
+        let anneal_factor = 1.0 + (q.avoid_empties - C.anneal_end).max(0) as f32 * mult_factor;
+        let anneal_factor = 1.0 / anneal_factor;
+
+        // calculate soft-max of weights
+        // and use those values as probabilities to choose the action
+        let exps = choices.iter().map(|&(_a, w)| (w * anneal_factor).exp()).collect::<Vec<_>>();
+        let exp_sum: f32 = exps.iter().sum();
+        let soft_max = exps.iter().map(|exp| exp / exp_sum);
+        let running_sum = soft_max.fold(Vec::new(), |mut sums, soft| {
+            let last_sum = *sums.last().unwrap_or(&0.0);
+            sums.push(last_sum + soft);
+            sums
+        });
+        let choice_val = rng.gen_range(0.0, 1.0);
+        let choice_i = running_sum.iter().position(|&sum| sum >= choice_val).unwrap();
         if rng.gen_weighted_bool(10000) {
-            println!("Made decision based on best q-value of {}", best_choice.1);
+            println!("Made probabilistic decision to use {:?}", choices[choice_i]);
+            println!("From choices: {:?}", choices);
         }
-        return best_choice.0;
+        return choices[choice_i].0;
+        // return best_choice.0;
     }
 }
 
@@ -2329,7 +2353,7 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
     add_q_reward(&mut new_target_qs, &trips_completed, C.trip_reward);
 
     let dead = find_dead_agents(agents);
-    stats.dead += dead.len() as u32;
+    stats.deaths += dead.len() as u32;
     // add_q_reward(&mut new_target_qs, &dead, -100.0);
     // add_q_reward(&mut base_avoid_qs, &dead, -100.0);
 
@@ -2567,6 +2591,7 @@ fn main() {
     let mut time_step = 0;
     let mut run_slow = false;
     let mut simulation_running = true;
+    let mut counter_reset_finished = false;
     thread::spawn(move || {
         loop {
             if io_receiver.try_recv().is_ok() {
@@ -2576,6 +2601,7 @@ fn main() {
                 println!("On timestep {}k", time_step / 1000);
             }
             if !simulation_running {
+                thread::sleep(std::time::Duration::from_millis(C.slow_step_ms as u64));
                 continue;
             }
             if run_slow {
@@ -2593,6 +2619,13 @@ fn main() {
 
             if (time_step % C.fast_steps_update_q_empties) == 0 {
                 q.avoid_empties = q_avoid_count_empties(&q);
+            }
+
+            if time_step >= C.reset_counters_at_timestep && !counter_reset_finished {
+                counter_reset_finished = true;
+                thread_state.stats.deaths = 0;
+                thread_state.stats.collisions = 0;
+                thread_state.stats.trips_completed = 0;
             }
 
             if time_step >= C.timestep_limit {

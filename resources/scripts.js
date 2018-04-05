@@ -117,7 +117,7 @@ function render() {
 }
 
 function update_stats() {
-    document.getElementById("dead").innerHTML = "Deaths: <b>" + document.stats.dead + "</b>";
+    document.getElementById("deaths").innerHTML = "Deaths: <b>" + document.stats.deaths + "</b>";
     document.getElementById("collisions").innerHTML = "Collisions: <b>" + document.stats.collisions + "</b>";
     document.getElementById("trips_completed").innerHTML = "Trips Completed: <b>" + document.stats.trips_completed + "</b>";
 }
