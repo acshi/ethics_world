@@ -17,6 +17,8 @@ extern crate config;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::cell::UnsafeCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 use std::f32::{self, consts};
@@ -27,7 +29,7 @@ use fnv::FnvHashMap;
 use rocket::{State};
 use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
-use rand::Rng;
+use rand::{Rng, XorShiftRng};
 use serde::ser::{SerializeStruct, SerializeTuple};
 
 mod general_search;
@@ -76,10 +78,12 @@ struct ConfSettings {
     pedestrian_n: usize, // those on map at one time
     vehicle_n: usize,
 
+    timestep_limit: u32,
+
     // for the MDP/Q-Learning processses
     state_avoid_dist: u32,
-    explore_one_in_min: u32,
     explore_one_in_max: u32,
+    explore_consecutive_limit: u32,
     q_learn_rate: f32,
     q_discount: f32,
     damage_coef: f32,
@@ -93,8 +97,8 @@ struct ConfSettings {
 
     heal_reward: i32,
 
-    fast_steps_per_update: u64,
-    slow_step_ms: u64,
+    fast_steps_per_update: u32,
+    slow_step_ms: u32,
 }
 
 lazy_static! {
@@ -117,6 +121,36 @@ lazy_static! {
     	};
         settings
     };
+}
+
+thread_local! {
+    static RAND: Rc<UnsafeCell<XorShiftRng>> = {
+        Rc::new(UnsafeCell::new(XorShiftRng::new_unseeded()))
+    };
+}
+
+// basically just the same as https://doc.rust-lang.org/rand/src/rand/thread_rng.rs.html#97-99
+#[derive(Clone, Debug)]
+pub struct RepeatableRng {
+    rng: Rc<UnsafeCell<XorShiftRng>>
+}
+
+impl Rng for RepeatableRng {
+    #[inline(always)]
+    fn next_u32(&mut self) -> u32 {
+        unsafe { (*self.rng.get()).next_u32() }
+    }
+    #[inline(always)]
+    fn next_u64(&mut self) -> u64 {
+        unsafe { (*self.rng.get()).next_u64() }
+    }
+    fn fill_bytes(&mut self, bytes: &mut [u8]) {
+        unsafe { (*self.rng.get()).fill_bytes(bytes) }
+    }
+}
+
+fn repeatable_rand() -> RepeatableRng {
+    RepeatableRng { rng: RAND.with(|r| r.clone()) }
 }
 
 bitflags! {
@@ -207,7 +241,7 @@ fn create_buildings(m: &mut WorldMap) {
         panic!("Building number too low! must be at least 2 to create destinations.");
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let outer_perim = m.horiz_road_length * 2 + m.vert_road_length * 2;
     let inner_perim = outer_perim - (m.vert_road_width * 2 + m.horiz_road_width * 2 +
@@ -314,7 +348,7 @@ fn create_buildings(m: &mut WorldMap) {
 }
 
 fn create_crosswalks(m: &mut WorldMap) {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let horiz_crosswalk_perim = m.horiz_road_length - 2 * m.vert_road_width - CROSSWALK_WIDTH;
     let vert_crosswalk_perim = m.vert_road_length - 2 * m.horiz_road_width - CROSSWALK_WIDTH;
@@ -372,7 +406,7 @@ fn create_map() -> WorldMap {
     let grid = [Cell{bits: 0u8}; MAP_SIZE as usize];
     let buildings = Vec::new();
 
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     // we make the horizontal (at top and bottom) roads have the same parameters
     // and the vertical ones have their own
@@ -469,6 +503,8 @@ struct Agent {
     kind: AgentKind,
     on_map: bool,
     frozen_steps: u32, // does not get an action for x steps... like after a collision
+    // number of consecutive explore actions taken (after getting to only explore_one_in_max)
+    explore_actions: u32,
 
     pose: (u32, u32, u32), // x, y, theta (increments of THETA_PER_INC)
     width: u32, // perpendicular to theta
@@ -566,28 +602,33 @@ fn difference<T>(a: T, b: T) -> T
     if a > b { a - b } else  { b - a }
 }
 
-fn pose_size_to_bounding_rect_i32(p: (i32, i32, i32), size: (i32, i32))
-                              -> BoundingRect {
+type BoundingRectF32 = ((f32, f32), (f32, f32));
+
+fn pose_size_to_bounding_rect_f32(p: (i32, i32, i32), size: (f32, f32))
+                              -> BoundingRectF32 {
     let (x, y, t) = p;
     let t = t as i32;
     let (sx, sy) = size;
-
-    let rw = rotate_pt((sx as f32, 0.0), -t);
-    let rl = rotate_pt((0.0, sy as f32), -t);
     let (x, y) = (x as f32, y as f32);
 
-    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0).floor() as i32;
-    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1).floor() as i32;
-    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0).ceil() as i32;
-    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1).ceil() as i32;
+    let rw = rotate_pt((sx, 0.0), -t);
+    let rl = rotate_pt((0.0, sy), -t);
+
+    let min_x = x.min(x + rw.0).min(x + rl.0).min(x + rw.0 + rl.0);
+    let min_y = y.min(y + rw.1).min(y + rl.1).min(y + rw.1 + rl.1);
+    let max_x = x.max(x + rw.0).max(x + rl.0).max(x + rw.0 + rl.0);
+    let max_y = y.max(y + rw.1).max(y + rl.1).max(y + rw.1 + rl.1);
 
     ((min_x, min_y), (max_x, max_y))
 }
 
 fn pose_size_to_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
                               -> BoundingRect {
-    pose_size_to_bounding_rect_i32((p.0 as i32, p.1 as i32, p.2 as i32),
-                                   (size.0 as i32, size.1 as i32))
+    let (mins, maxs) = pose_size_to_bounding_rect_f32((p.0 as i32, p.1 as i32, p.2 as i32),
+                                                      (size.0 as f32, size.1 as f32));
+
+    ((mins.0.floor() as i32, mins.1.floor() as i32),
+     (maxs.0.ceil() as i32, maxs.1.ceil() as i32))
 }
 
 fn create_bounding_rect_table_for_size(size: (u32, u32)) -> Vec<BoundingRect> {
@@ -788,7 +829,7 @@ fn spawn_from_perim(m: &WorldMap, building: Building, building_margin: u32,
                     size: (u32, u32), pts: &RectU32, occupied: &Vec<bool>,
                     margin: u32, is_inner: bool)
                     -> Option<(u32, u32, u32)> {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let lines = points_to_lines_u32(pts);
 
@@ -846,7 +887,7 @@ fn spawn_on_two_perims(m: &WorldMap, buildings: &[Building], building_margin: u3
                        pts_a: &RectU32, pts_b: &RectU32,
                        occupied_a: &Vec<bool>, occupied_b: &Vec<bool>,
                        margin: u32) -> Option<((u32, u32, u32), u32)> {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let mut ordering = (0..buildings.len()).collect::<Vec<_>>();
     rng.shuffle(&mut ordering);
@@ -1118,7 +1159,7 @@ fn calc_occupied_perim_map(agents: &[Agent], path: &RectU32,
 }
 
 fn draw_off_map_agent_i(agents: &[Agent], kind: AgentKind) -> Option<usize> {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
     let off_map_agents = agents.iter()
                                .enumerate()
                                .filter_map(|(i, a)|
@@ -1181,7 +1222,7 @@ fn setup_map_paths(m: &mut WorldMap) {
 }
 
 fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let mut p_count = agents.iter().filter(|p|
                                             p.kind == AgentKind::Pedestrian && p.on_map).count();
@@ -1224,7 +1265,7 @@ fn replenish_pedestrians(m: &WorldMap, agents: &mut [Agent]) {
 }
 
 fn replenish_vehicles(m: &WorldMap, agents: &mut [Agent]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let mut v_count = agents.iter().filter(|p| p.kind == AgentKind::Vehicle && p.on_map).count();
 
@@ -1346,15 +1387,16 @@ enum Action {
     AccelerateForward,
     AccelerateBackward,
     Brake,
-    Nothing,
+    Continue,
     Frozen,
+    Nothing,
 }
 
 impl Action {
     pub fn normal_actions() -> &'static [Action] {
         static ACTIONS: [Action; 6] = [Action::TurnLeft, Action::TurnRight,
                                        Action::AccelerateForward, Action::AccelerateBackward,
-                                       Action::Brake, Action::Nothing];
+                                       Action::Brake, Action::Continue];
         &ACTIONS
     }
 }
@@ -1387,16 +1429,9 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
 
     let (a_width, a_length) = (agent.width as f32, agent.length as f32);
 
-    let (sin_o, cos_o) = fast_sin_cos(other.pose.2 as i32);
-    let (o_width, o_length) = (other.width as f32, other.length as f32);
-    // rotate the other's size by its own theta and then back by the agent's
-    // so we can get it as if the (main) agent is at theta=0
-    // and also rotate the vector (dx, dy) by the agent's theta for the same purpose
-    let (o_width, o_length) = (cos_o * o_width + sin_o * o_length,
-                               -sin_o * o_width + cos_o * o_length);
-    let (o_width, o_length) = (cos_a * o_width + sin_a * o_length,
-                               -sin_a * o_width + cos_a * o_length);
-    let (o_width, o_length) = (o_width.round() as i32, o_length.round() as i32);
+    // create bounding rect for the other based on the relative angles
+    // we also separately need to rotate the vector (dx, dy) by the agent's theta
+    // this way we can construct the other's full pose in the agent's body frame
 
     let rel_x = cos_a * dx + sin_a * dy;
     let rel_y = -sin_a * dx + cos_a * dy;
@@ -1407,22 +1442,24 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
     let rel_y = if rel_y > 0.0 {
                     if a_length >= rel_y { 0.0 } else { rel_y - a_length} } else { rel_y };
 
-    let rel_x = rel_x.round() as i32;
-    let rel_y = rel_y.round() as i32;
-
     let rel_theta = (other.pose.2 + TWO_PI_INCS - agent.pose.2) % TWO_PI_INCS;
-    let ((lx, ly), (hx, hy)) = pose_size_to_bounding_rect_i32((0, 0, 0),
-                                                          (o_width, o_length));
-    let ((lx, ly), (hx, hy)) = ((lx as i32 + rel_x,
-                                ly as i32 + rel_y),
-                                (hx as i32 + rel_x,
-                                hy as i32 + rel_y));
-    let rel_x = if lx * hx <= 0 { 0 } else {
+    let (o_width, o_length) = (other.width as f32, other.length as f32);
+    let ((lx, ly), (hx, hy)) = pose_size_to_bounding_rect_f32(
+                                            (0, 0, rel_theta as i32),
+                                            (o_width, o_length));
+    let ((lx, ly), (hx, hy)) = ((lx + rel_x,
+                                ly + rel_y),
+                                (hx + rel_x,
+                                hy + rel_y));
+
+    let rel_x = if lx * hx <= 0.0 { 0.0 } else {
         if lx.abs() < hx.abs() { lx } else { hx }
     };
-    let rel_y = if ly * hy <= 0 { 0 } else {
+    let rel_y = if ly * hy <= 0.0 { 0.0 } else {
         if ly.abs() < hy.abs() { ly } else { hy }
     };
+    let (rel_x, rel_y) = (rel_x.round() as i32, rel_y.round() as i32);
+
     QStateAvoid {
                   is_pedestrian: agent.kind == AgentKind::Pedestrian,
                   // other_pedestrian: other.kind == AgentKind::Pedestrian,
@@ -1486,7 +1523,7 @@ fn q_avoid_weights(q: &mut QLearning, agents: &[Agent],
     let mut num_summed = 0;
     for other_i in 0..agents.len() {
         let dist = get_agent_1_dist(&agent_dists, agent_i, other_i);
-        if dist < C.state_avoid_dist {
+        if dist <= C.state_avoid_dist {
             num_summed += 1;
             let qstate_avoid = qstate_avoid_for_agent(agent, &agents[other_i]);
             let more_weights = q.avoid_values.get(&qstate_avoid);
@@ -1622,13 +1659,13 @@ fn get_possible_actions_by(vel: i32) -> Vec<Action> {
     if vel >= 0 && vel < C.max_forward_vel as i32 {
         actions.push(Action::AccelerateForward);
     }
-    if vel <= 0 && vel > C.max_forward_vel as i32 {
+    if vel <= 0 && vel > -(C.max_backward_vel as i32) {
         actions.push(Action::AccelerateBackward);
     }
     if vel != 0 {
         actions.push(Action::Brake);
     }
-    actions.push(Action::Nothing);
+    actions.push(Action::Continue);
 
     actions
 }
@@ -1638,56 +1675,111 @@ fn get_possible_actions(agent: &Agent) -> Vec<Action> {
 }
 
 fn choose_action(_map: &WorldMap, q: &mut QLearning,
-                 agents: &[Agent], agent_dists: &AgentDistanceTable, agent_i: usize) -> Action {
-    let agent = &agents[agent_i];
+                 agents: &mut [Agent], agent_dists: &AgentDistanceTable, agent_i: usize) -> Action {
+    let actions;
+    let choices = {
+        let agent = &agents[agent_i];
 
-    if !agent.on_map || agent.kind == AgentKind::Obstacle {
-        return Action::Nothing;
-    }
-    if agent.frozen_steps > 0 {
-        return Action::Frozen;
-    }
+        if !agent.on_map || agent.kind == AgentKind::Obstacle {
+            return Action::Nothing;
+        }
+        if agent.frozen_steps > 0 {
+            return Action::Frozen;
+        }
 
-    let actions = get_possible_actions(agent);
+        actions = get_possible_actions(agent);
 
-    let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
-    let folk_w = folk_theory_weights(agents, &actions, agent);
-    let internal_w = internalization_theory_weights(agents, &actions, agent);
-    let mut weights = habit_w;
-    for i in 0..weights.len() {
-        weights[i] += folk_w[i] + internal_w[i];
-    }
+        let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
+        let folk_w = folk_theory_weights(agents, &actions, agent);
+        let internal_w = internalization_theory_weights(agents, &actions, agent);
+        let mut weights = habit_w;
+        for i in 0..weights.len() {
+            weights[i] += folk_w[i] + internal_w[i];
+        }
 
-    let choices = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
-    let choices = choice_restriction_theory_filter(agents, agent, &choices);
+        let choices = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
+        choice_restriction_theory_filter(agents, agent, &choices)
+    };
 
-    let mut rng = rand::thread_rng();
+    let agent = &mut agents[agent_i];
 
-    // if we are a habit-theory agent, explore a new action first
-    let mut should_explore = false;
-    if agent.habit_theory != 0.0 {
-        let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
-        let n_actions = actions.len() as u32;
-        let explore_one_in = C.explore_one_in_min +
-                             (C.explore_one_in_max - C.explore_one_in_min) *
-                             (n_actions - unexplored_actions) / n_actions;
-        should_explore = rng.gen_weighted_bool(explore_one_in);
-    }
+    let mut rng = repeatable_rand(); //rand::thread_rng();
 
     let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
                                           |a, &c| if c.1 > a.1 { c } else { a });
-    if best_choice.1 == 0.0 {
-        should_explore = true;
-    }
-
-    if should_explore {
-        return *rng.choose(&actions).unwrap();
-    } else {
-        if rng.gen_weighted_bool(10000) {
-            println!("Made decision based on best q-value of {}", best_choice.1);
+    let mut action_choice = best_choice.0;
+    // if we are a habit-theory agent, prefer exploring a new action first
+    if agent.habit_theory != 0.0 {
+        let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).collect::<Vec<_>>();
+        if unexplored_actions.len() == 0 {
+            if rng.gen_weighted_bool(C.explore_one_in_max) {
+                agent.explore_actions += 1;
+                if agent.explore_actions <= C.explore_consecutive_limit {
+                    action_choice = *rng.choose(&actions).unwrap();
+                    if rng.gen_weighted_bool(10000) {
+                        println!("Already explored, but choose a random action");
+                    }
+                } else {
+                    agent.explore_actions = 0;
+                    if rng.gen_weighted_bool(10000) {
+                        println!("Choose best action to keep from exploring too much in a row");
+                    }
+                }
+            } else {
+                agent.explore_actions = 0;
+                if rng.gen_weighted_bool(10000) {
+                    println!("Choose best action");
+                }
+            }
+        } else {
+            action_choice = (*rng.choose(&unexplored_actions).unwrap()).0;
+            if rng.gen_weighted_bool(10000) {
+                println!("Choice random unexplored action");
+            }
         }
-        return best_choice.0;
     }
+    action_choice
+    //
+    // // if we are a habit-theory agent, prefer exploring a new action first
+    // let mut should_explore = false;
+    // if agent.habit_theory != 0.0 {
+    //     let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
+    //     let n_actions = actions.len() as u32;
+    //     let explore_one_in = 1 +
+    //                          (C.explore_one_in_max - 1) *
+    //                          (n_actions - unexplored_actions) / n_actions;
+    //     should_explore = rng.gen_weighted_bool(explore_one_in);
+    //     if should_explore && explore_one_in == C.explore_one_in_max {
+    //         agent.explore_actions += 1;
+    //         if agent.explore_actions > 3 {
+    //             should_explore = false;
+    //             agent.explore_actions = 0;
+    //         }
+    //         // if agent.explore_actions > 3 {
+    //         //     println!("{} consecutive explores", agent.explore_actions);
+    //         // }
+    //     } else {
+    //         agent.explore_actions = 0;
+    //     }
+    // }
+    //
+    // let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
+    //                                       |a, &c| if c.1 > a.1 { c } else { a });
+    // // if best_choice.1 == 0.0 {
+    // //     should_explore = true;
+    // // }
+    //
+    // if should_explore {
+    //     if rng.gen_weighted_bool(10000) {
+    //         println!("Made decision randomly");
+    //     }
+    //     return *rng.choose(&actions).unwrap();
+    // } else {
+    //     if rng.gen_weighted_bool(10000) {
+    //         println!("Made decision based on best q-value of {}", best_choice.1);
+    //     }
+    //     return best_choice.0;
+    // }
 }
 
 fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
@@ -1729,8 +1821,7 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
                 agent.velocity += if agent.velocity > 0 { -(C.brake_power as i32) } else { C.brake_power as i32 };
             }
         },
-        Action::Nothing => {
-            return;
+        Action::Continue => {
         },
         Action::Frozen => {
             if agent.frozen_steps > 0 {
@@ -1738,6 +1829,9 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
             }
             return;
         },
+        Action::Nothing => {
+            return;
+        }
     }
     let (sin_t, cos_t) = fast_sin_cos(agent.pose.2 as i32);
 
@@ -1970,6 +2064,7 @@ fn clear_from_collision(agents: &mut [Agent], agent_i: usize) {
     // println!("Could not free agent {}, counting it dead", agent_i);
     agents[agent_i].pose = pose;
     agents[agent_i].health = 0;
+    agents[agent_i].velocity = 0;
     agents[agent_i].on_map = false;
 }
 
@@ -1995,10 +2090,11 @@ fn resolve_collisions(agents: &mut [Agent], collisions: &[Collision]) {
 fn evolve_new_agent(agents: &[Agent], kind: AgentKind) -> Agent {
     let alive = agents.iter().filter(|a| a.health > 0 &&
                                          a.kind == kind).collect::<Vec<_>>();
-    let mut rng = rand::thread_rng();
+    let mut rng = repeatable_rand(); //rand::thread_rng();
     let mut new_agent = **rng.choose(&alive).unwrap();
     new_agent.health = 99;
     new_agent.on_map = false;
+    new_agent.velocity = 0;
     new_agent
 }
 
@@ -2036,6 +2132,7 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
         if dist <= building_margin {
             agent.on_map = false;
             agent.health = (agent.health + C.heal_reward).min(99);
+            agent.velocity = 0;
             trips_completed.push(i);
         }
     }
@@ -2103,7 +2200,7 @@ fn calc_q_avoids_states(agents: &[Agent], agent_dists: &AgentDistanceTable) -> V
         }
         for j in 0..agents.len() {
             let dist = get_agent_1_dist(&agent_dists, i, j);
-            if dist < C.state_avoid_dist {
+            if dist <= C.state_avoid_dist {
                 let q_avoid = qstate_avoid_for_agent(agent, &agents[j]);
                 agent_avoids.push((j, q_avoid));
             }
@@ -2320,18 +2417,27 @@ fn q_avoid_diagnostic(q: &QLearning) {
         Err(e) => panic!("file error: {}", e),
     };
 
-    for other_y in -20..20 {
-        for other_x in -20..20 {
+    let mut empties = 0;
+
+    let avoid_dist = C.state_avoid_dist as i32; // -1 because we use less than this dist.
+    for other_y in -avoid_dist..(avoid_dist + 1) {
+        for other_x in -avoid_dist..(avoid_dist + 1) {
+            if other_y.abs() + other_x.abs() > avoid_dist {
+                write!(f_x, "{}, ", f32::NAN).unwrap();
+                write!(f_y, "{}, ", f32::NAN).unwrap();
+                continue;
+            }
             let mut best = f32::MIN;
             let mut best_action_i = 0;
             let mut best_vel = 0;
             let mut acc_val = 0.0;
             let mut acc_count = 0;
-            for vel in -3..4 {
+            for vel in -3..-2 {//-3..4 {
                 let possible_actions = get_possible_actions_by(vel);
                 let q_avoid = QStateAvoid {vel, other_x, other_y, is_pedestrian: false };
                 let vals = q.avoid_values.get(&q_avoid);
                 if vals.is_none() {
+                    empties += possible_actions.len();
                     continue;
                 }
                 let vals = vals.unwrap();
@@ -2341,6 +2447,14 @@ fn q_avoid_diagnostic(q: &QLearning) {
                         continue;
                     }
 
+                    if val == 0.0 {
+                        empties += 1;
+                        continue;
+                    }
+                    // if val_action == Action::TurnRight {
+                    //     continue;
+                    // }
+
                     if val > best {
                         best = val;
                         best_action_i = i;
@@ -2349,16 +2463,22 @@ fn q_avoid_diagnostic(q: &QLearning) {
                         acc_count += 1;
                     }
                 }
+                // if best != f32::MIN {
+                //     println!("TL: {} TR: {} best: {} best_i: {}", vals[0], vals[1], best, best_action_i);
+                // }
             }
+
             let best_action = Action::normal_actions()[best_action_i];
+
             let new_direction = match best_action {
                 Action::TurnLeft => if best_vel < 0 { consts::PI + THETA_PER_INC} else { THETA_PER_INC },
-                Action::TurnRight => if best_vel < 0 { -THETA_PER_INC} else { consts::PI - THETA_PER_INC },
+                Action::TurnRight => if best_vel < 0 { consts::PI - THETA_PER_INC} else { 2.0 * consts::PI - THETA_PER_INC },
                 Action::AccelerateForward => 0.0,
                 Action::AccelerateBackward => consts::PI,
                 Action::Brake => if best_vel < 0 { 0.0 } else { consts::PI },
-                Action::Nothing => if best_vel < 0 { consts::PI } else { 0.0 },
-                Action::Frozen => 0.0,
+                Action::Continue => if best_vel < 0 { consts::PI } else { 0.0 },
+                Action::Frozen => panic!("Action::Frozen invalid in q avoid diagnostic"),
+                Action::Nothing => panic!("Action::Nothing invalid in q avoid diagnostic"),
             };
 
             let x_part = -new_direction.sin() * acc_val / acc_count as f32;
@@ -2370,6 +2490,8 @@ fn q_avoid_diagnostic(q: &QLearning) {
         writeln!(f_x, "").unwrap();
         writeln!(f_y, "").unwrap();
     }
+
+    println!("{} empties remain in q_avoid table", empties);
 }
 
 fn main() {
@@ -2400,6 +2522,7 @@ fn main() {
     let thread_state = state.clone();
     let mut q = QLearning::default();
     let mut iter = 0;
+    let mut time_step = 0;
     let mut run_slow = false;
     thread::spawn(move || {
         loop {
@@ -2409,15 +2532,22 @@ fn main() {
                 q_avoid_diagnostic(&q);
             }
             if run_slow {
-                thread::sleep(std::time::Duration::from_millis(C.slow_step_ms));
+                thread::sleep(std::time::Duration::from_millis(C.slow_step_ms as u64));
             } else if (iter % C.fast_steps_per_update) == 0 {
                 thread::sleep(std::time::Duration::from_millis(1));
                 iter = 0;
             }
             iter += 1;
+            time_step += 1;
+
             let thread_state = &mut *thread_state.lock().unwrap();
             run_timestep(&thread_state.map, &mut q,
                          &mut thread_state.agents, &mut thread_state.stats);
+
+            if time_step >= C.timestep_limit {
+                println!("Completed {} timsteps. Stopping simulation.", iter);
+                return;
+            }
         }
     });
 

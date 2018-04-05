@@ -1,0 +1,26 @@
+population_n = 24 # one-half this for each of pedestrians and vehicles
+pedestrian_n = 0 # those on map at one time
+vehicle_n = 1
+
+# for repeatable testing
+timestep_limit = 10000
+
+# for the MDP/Q-Learning processses
+state_avoid_dist = 10
+explore_one_in_max = 10
+explore_consecutive_limit = 2
+q_learn_rate = 0.2
+q_discount = 0.95
+trip_reward = 0
+damage_coef = 100
+
+forward_accel = 1
+backward_accel = 1
+max_forward_vel = 3
+max_backward_vel = 3
+brake_power = 2
+
+heal_reward = 10
+
+fast_steps_per_update = 400 # number of timesteps between chances for visualization output
+slow_step_ms = 20 # real time per simulated timestep for visualization

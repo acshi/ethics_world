@@ -42,6 +42,39 @@ fn test_q_avoid() {
     let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
     assert_eq!(qavoid_2.other_x, 6);
     assert_eq!(qavoid_2.other_y, 0);
+
+    let agent1 = Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+    let agent2 = Agent{pose: (30, 30, PI_OVER_TWO_INCS), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+
+    let qavoid_1 = qstate_avoid_for_agent(&agent1, &agent2);
+    assert_eq!(qavoid_1.other_x, 16);
+    assert_eq!(qavoid_1.other_y, 6);
+
+    let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
+    assert_eq!(qavoid_2.other_x, 6);
+    assert_eq!(qavoid_2.other_y, -16);
+
+    let agent1 = Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+    let agent2 = Agent{pose: (14, 24, PI_OVER_TWO_INCS / 2), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+
+    let qavoid_1 = qstate_avoid_for_agent(&agent1, &agent2);
+    assert_eq!(qavoid_1.other_x, 0);
+    assert_eq!(qavoid_1.other_y, 1);
+
+    let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
+    assert_eq!(qavoid_2.other_x, 0);
+    assert_eq!(qavoid_2.other_y, -3);
+
+    let agent1 = Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+    let agent2 = Agent{pose: (7, 21, TWO_PI_INCS - PI_OVER_TWO_INCS / 2), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()};
+
+    let qavoid_1 = qstate_avoid_for_agent(&agent1, &agent2);
+    assert_eq!(qavoid_1.other_x, 0);
+    assert_eq!(qavoid_1.other_y, 1);
+
+    let qavoid_2 = qstate_avoid_for_agent(&agent2, &agent1);
+    assert_eq!(qavoid_2.other_x, 0);
+    assert_eq!(qavoid_2.other_y, -3);
 }
 
 #[test]
@@ -162,6 +195,11 @@ fn test_wall_collision_detection() {
 
     let mut agents = create_edge_walls();
     agents.push(Agent{pose: (MAP_WIDTH - 4, 1, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()});
+    let collisions = find_collisions(&agents);
+    assert_eq!(collisions.len(), 1);
+
+    let mut agents = create_edge_walls();
+    agents.push(Agent{pose: (MAP_WIDTH - 4, 20, PI_OVER_TWO_INCS), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()});
     let collisions = find_collisions(&agents);
     assert_eq!(collisions.len(), 1);
 }
