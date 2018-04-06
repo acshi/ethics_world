@@ -77,6 +77,8 @@ struct ConfSettings {
 	population_n: usize, // one-half this for each of pedestrians and vehicles
     pedestrian_n: usize, // those on map at one time
     vehicle_n: usize,
+    total_health: u32,
+    heal_reward: i32,
 
     timestep_limit: u32,
 
@@ -93,14 +95,13 @@ struct ConfSettings {
     anneal_start: u32,
     anneal_end: u32,
     reset_counters_at_timestep: u32,
+    debug_choices_after: u32,
 
     forward_accel: u32,
     backward_accel: u32,
     max_forward_vel: u32,
     max_backward_vel: u32,
     brake_power: u32,
-
-    heal_reward: i32,
 
     fast_steps_per_update: u32,
     slow_step_ms: u32,
@@ -544,7 +545,9 @@ impl serde::Serialize for Agent {
         state.serialize_field("theta", &(self.pose.2 as f32 * THETA_PER_INC))?;
         state.serialize_field("width", &self.width)?;
         state.serialize_field("length", &self.length)?;
-        state.serialize_field("health", &self.health)?;
+        // feed the gui a value 0 to 99
+        let health = self.health * 99 / C.total_health as i32;
+        state.serialize_field("health", &health)?;
         state.serialize_field("destination_building_i", &self.destination_building_i)?;
         state.end()
     }
@@ -1347,7 +1350,7 @@ fn create_agents(map: &mut WorldMap) -> Vec<Agent> {
     let mut agents = Vec::new();
     let p = Agent{kind: AgentKind::Pedestrian,
                       width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE,
-                      health: 99,
+                      health: C.total_health as i32,
                       habit_theory: 1.0,
                       ..Agent::default()};
     for _ in 0..(C.population_n/2) {
@@ -1356,7 +1359,7 @@ fn create_agents(map: &mut WorldMap) -> Vec<Agent> {
 
     let v = Agent{kind: AgentKind::Vehicle,
                       width: VEHICLE_WIDTH, length: VEHICLE_LENGTH,
-                      health: 99,
+                      health: C.total_health as i32,
                       habit_theory: 1.0,
                       ..Agent::default()};
     for _ in 0..(C.population_n/2) {
@@ -1469,7 +1472,7 @@ fn qstate_avoid_for_agent(agent: &Agent, other: &Agent) -> QStateAvoid {
     QStateAvoid {
                   is_pedestrian: agent.kind == AgentKind::Pedestrian,
                   // other_pedestrian: other.kind == AgentKind::Pedestrian,
-                  vel: agent.velocity,
+                  vel: agent.velocity.signum(),
                   other_x: rel_x,
                   other_y: rel_y,
                   // other_theta: rel_theta,
@@ -2121,7 +2124,7 @@ fn evolve_new_agent(agents: &[Agent], kind: AgentKind) -> Agent {
                                          a.kind == kind).collect::<Vec<_>>();
     let mut rng = repeatable_rand(); //rand::thread_rng();
     let mut new_agent = **rng.choose(&alive).unwrap();
-    new_agent.health = 99;
+    new_agent.health = C.total_health as i32;
     new_agent.on_map = false;
     new_agent.velocity = 0;
     new_agent
@@ -2160,7 +2163,7 @@ fn evaluate_trips(map: &WorldMap, agents: &mut [Agent], agent_dists: &AgentDista
                                 { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
         if dist <= building_margin {
             agent.on_map = false;
-            agent.health = (agent.health + C.heal_reward).min(99);
+            agent.health = (agent.health + C.heal_reward).min(C.total_health as i32);
             agent.velocity = 0;
             trips_completed.push(i);
         }
@@ -2312,6 +2315,15 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
     let prior_q_targets = agents.iter().map(|a| qstate_target_for_agent(a)).collect::<Vec<_>>();
     let prior_q_avoids = calc_q_avoids_states(agents, &agent_dists); // here
 
+    let habit_ws = (0..agents.len()).map(|i| {
+        if q.avoid_empties <= C.debug_choices_after {
+            let possible_actions = get_possible_actions(&agents[i]);
+            habit_theory_weights(q, agents, &agent_dists, &possible_actions, i)
+        } else {
+            Vec::new()
+        }
+    }).collect::<Vec<_>>();
+
     let actions = update_agents(map, q, agents, &agent_dists); // here
     let collisions = find_collisions(agents);
     stats.collisions += collisions.len() as u32;
@@ -2336,20 +2348,14 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
         }
     }
 
-    // for (i, a) in agents.iter().enumerate() {
-    //     let building_i = a.destination_building_i;
-    //     let building_agent_i = map.buildings[building_i as usize].agent_i;
-    //     let dist_to_goal = get_agent_1_dist(&agent_dists, i, building_agent_i) as f32;
-    //     new_qs[i] += (MAP_WIDTH + MAP_HEIGHT) as f32 - dist_to_goal;
-    // }
+    if collisions.len() > 0 && q.avoid_empties <= C.debug_choices_after {
+        let coll_i = collisions[0].agent1_i;
+        println!("Habit weights w/ vel {} that lead to choose action {:?} with collision result: {:?}",
+                 prior_q_targets[coll_i].vel, actions[coll_i], habit_ws[coll_i]);
+    }
 
     let trips_completed = evaluate_trips(map, agents, &agent_dists); // here
     stats.trips_completed += trips_completed.len() as u32;
-    // for &i in trips_completed.iter() {
-    //     if new_qs[i].unwrap_or(0.0) != 0.0 {
-    //         std::process::abort();
-    //     }
-    // }
     add_q_reward(&mut new_target_qs, &trips_completed, C.trip_reward);
 
     let dead = find_dead_agents(agents);
@@ -2438,6 +2444,8 @@ fn q_diagnostic(q: &QLearning) {
 
 fn q_avoid_count_empties(q: &QLearning) -> u32 {
     let mut empties = 0;
+    let mut action_empties = [0; 6];
+    let normal_actions = Action::normal_actions();
 
     let avoid_dist = C.state_avoid_dist as i32; // -1 because we use less than this dist.
     for other_y in -avoid_dist..(avoid_dist + 1) {
@@ -2445,29 +2453,34 @@ fn q_avoid_count_empties(q: &QLearning) -> u32 {
             if other_y.abs() + other_x.abs() > avoid_dist {
                 continue;
             }
-            for vel in -3..-2 {//-3..4 {
+            for &vel in [-1, 0, 1].iter() {
                 let possible_actions = get_possible_actions_by(vel);
                 let q_avoid = QStateAvoid {vel, other_x, other_y, is_pedestrian: false };
                 let vals = q.avoid_values.get(&q_avoid);
                 if vals.is_none() {
                     empties += possible_actions.len() as u32;
+                    for &action in possible_actions.iter() {
+                        let action_i = normal_actions.iter().position(|&a| a == action).unwrap();
+                        action_empties[action_i] += 1;
+                    }
                     continue;
                 }
                 let vals = vals.unwrap();
                 for (i, &val) in vals.iter().enumerate() {
-                    let val_action = Action::normal_actions()[i];
+                    let val_action = normal_actions[i];
                     if possible_actions.iter().find(|&&a| a == val_action).is_none() {
                         continue;
                     }
 
                     if val == 0.0 {
                         empties += 1;
+                        action_empties[i] += 1;
                     }
                 }
             }
         }
     }
-    println!("Currently at {} empties!", empties);
+    println!("Currently at {} empties! by action: {:?}", empties, action_empties);
     empties
 }
 
@@ -2496,7 +2509,7 @@ fn q_avoid_diagnostic(q: &QLearning) {
             let mut best_vel = 0;
             let mut acc_val = 0.0;
             let mut acc_count = 0;
-            for vel in -3..-2 {//-3..4 {
+            for &vel in [-1].iter() {//-3..4 {
                 let possible_actions = get_possible_actions_by(vel);
                 let q_avoid = QStateAvoid {vel, other_x, other_y, is_pedestrian: false };
                 let vals = q.avoid_values.get(&q_avoid);
@@ -2555,7 +2568,7 @@ fn q_avoid_diagnostic(q: &QLearning) {
         writeln!(f_y, "").unwrap();
     }
 
-    println!("{} empties remain in q_avoid table", empties);
+    println!("{} empties at vel=-1/-2/-3 remain in q_avoid table", empties);
 }
 
 fn main() {

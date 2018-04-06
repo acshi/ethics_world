@@ -1,9 +1,13 @@
 population_n = 24 # one-half this for each of pedestrians and vehicles
 pedestrian_n = 0 # those on map at one time
 vehicle_n = 1
+total_health = 250 # targeting death rate of 1 in 80*365 deaths in 5.4e6 collisions
+heal_reward = 35
 
 # for repeatable testing
 timestep_limit = 6000000
+
+# target accident to fatality ratio: approx 80*365/5400000
 
 # for the MDP/Q-Learning processses
 state_avoid_dist = 10
@@ -12,7 +16,7 @@ explore_consecutive_limit = 1
 # We measure exploration by the number of zero entries in a specific part
 # of the q avoid state table. So this value will depend highly on state_avoid_dist
 # full exploration fills the table the fastest, but obviously is completely dumb!
-full_explore_until = 950
+full_explore_until = 9500
 q_learn_rate = 0.3
 q_discount = 0.95
 trip_reward = 100
@@ -22,18 +26,18 @@ damage_coef = 3
 # the number of zero entries in the  q-avoid-table is above the starting number.
 # when it reaches the end number then the damage_coef is as specified above.
 anneal_factor = 12
-anneal_start = 800
-anneal_end = 300
+anneal_start = 3500 #7500 #800
+anneal_end = 700 #5800 #2100 #300
 # when the timstep reaches this, reset all death, etc counters to 0.
 reset_counters_at_timestep = 5000000
+
+debug_choices_after = 730 #4000 #520
 
 forward_accel = 1
 backward_accel = 1
 max_forward_vel = 3
 max_backward_vel = 3
 brake_power = 2
-
-heal_reward = 10
 
 fast_steps_per_update = 400 # number of timesteps between chances for visualization output
 slow_step_ms = 20 # real time per simulated timestep for visualization
