@@ -4,10 +4,27 @@ vehicle_n = 1
 total_health = 250 # targeting death rate of 1 in 80*365 deaths in 5.4e6 collisions
 heal_reward = 35
 
+forward_accel = 1
+backward_accel = 1
+max_forward_vel = 3
+max_backward_vel = 3
+brake_power = 2
+
 # for repeatable testing
 timestep_limit = 6000000
+# when the timstep reaches this, reset all death, etc counters to 0.
+reset_counters_at_timestep = 5000000
 
-# target accident to fatality ratio: approx 80*365/5400000
+# for a single agent type setup
+use_single_agent_type = true
+habit_theory = 0.0
+folk_theory = 1.0
+internalization_theory = 0.0
+choice_restriction_theory = false
+
+# for the A-star search processes
+astar_depth = 3
+search_trip_complete_reward = 100
 
 # for the MDP/Q-Learning processses
 state_avoid_dist = 10
@@ -28,16 +45,10 @@ damage_coef = 3
 anneal_factor = 12
 anneal_start = 3500 #7500 #800
 anneal_end = 700 #5800 #2100 #300
-# when the timstep reaches this, reset all death, etc counters to 0.
-reset_counters_at_timestep = 5000000
+
+# NOTE!!! We could also try an Upper Confidaence Bound action selection!
 
 debug_choices_after = 730 #4000 #520
-
-forward_accel = 1
-backward_accel = 1
-max_forward_vel = 3
-max_backward_vel = 3
-brake_power = 2
 
 fast_steps_per_update = 400 # number of timesteps between chances for visualization output
 slow_step_ms = 20 # real time per simulated timestep for visualization

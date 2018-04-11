@@ -95,7 +95,6 @@ pub struct SearchNode<T>
 {
     pub parent: Option<Rc<SearchNode<T>>>,
     pub state: T,
-    pub action: i32,
     pub depth: i32,
     pub path_cost: f32,
     pub ordering_cost: f32,
@@ -111,6 +110,7 @@ impl<T> SearchNode<T>
     }
 }
 
+// Ord to make priority queue a min-heap
 impl<T> Ord for SearchNode<T>
     where T: Clone
 {
@@ -119,9 +119,9 @@ impl<T> Ord for SearchNode<T>
             Ordering::Equal
         } else {
             if self.ordering_cost < other.ordering_cost {
-                Ordering::Less
-            } else {
                 Ordering::Greater
+            } else {
+                Ordering::Less
             }
         }
     }
@@ -149,9 +149,9 @@ pub trait SearchProblemTrait<T>
     where T: Clone
 {
     fn is_goal(&self, node: &SearchNode<T>) -> bool;
-    fn step_cost(&self, node: &SearchNode<T>, action: i32) -> f32;
+    fn step_cost(&self, node: &SearchNode<T>) -> f32;
     fn ordering_cost(&self, node: &SearchNode<T>) -> f32;
-    fn expand_state(&self, node: &SearchNode<T>) -> Box<Iterator<Item = (T, i32)>>;
+    fn expand_state(&self, node: &SearchNode<T>) -> Box<Iterator<Item = T>>;
 }
 
 impl<'a, T, QT> SearchProblemTrait<T> for SearchProblem<'a, T, QT>
@@ -161,25 +161,33 @@ impl<'a, T, QT> SearchProblemTrait<T> for SearchProblem<'a, T, QT>
         self.problem_traits.is_goal(node)
     }
 
-    fn step_cost(&self, node: &SearchNode<T>, action: i32) -> f32 {
-        self.problem_traits.step_cost(node, action)
+    fn step_cost(&self, node: &SearchNode<T>) -> f32 {
+        self.problem_traits.step_cost(node)
     }
 
     fn ordering_cost(&self, node: &SearchNode<T>) -> f32 {
         self.problem_traits.ordering_cost(node)
     }
 
-    fn expand_state(&self, node: &SearchNode<T>) -> Box<Iterator<Item = (T, i32)>> {
+    fn expand_state(&self, node: &SearchNode<T>) -> Box<Iterator<Item = T>> {
         self.problem_traits.expand_state(node)
     }
 }
 
+pub struct SearchResult<T, QT>
+    where T: Clone, QT: SearchQueue<SearchNode<T>>
+{
+    pub leaf: SearchNode<T>,
+    pub frontier: QT,
+    pub expanded_set: Option<HashSet<T>>,
+}
+
 #[allow(dead_code)]
-fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<SearchNode<T>>>, state: T, action: i32) -> SearchNode<T>
+fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<SearchNode<T>>>, state: T) -> SearchNode<T>
     where T: Clone, QT: SearchQueue<SearchNode<T>>
 {
     let mut node = SearchNode {
-        state, parent, action,
+        state, parent,
         depth: 0,
         path_cost: 0.0,
         ordering_cost: 0.0,
@@ -187,7 +195,7 @@ fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<Searc
     };
     if let Some(ref parent) = node.parent {
         node.depth = parent.depth + 1;
-        node.path_cost = parent.path_cost + p.step_cost(&node, action);
+        node.path_cost = parent.path_cost + p.step_cost(&node);
     }
     node.ordering_cost = p.ordering_cost(&node);
     node
@@ -195,12 +203,12 @@ fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<Searc
 
 // result error value indicates whether a depth increase could be helpful
 #[allow(dead_code)]
-fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<SearchNode<T>, bool>
+fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<SearchResult<T, QT>, bool>
     where T: Clone + Hash + Eq, QT: SearchQueue<SearchNode<T>>
 {
     let mut frontier = QT::new();
     let initial_state = p.initial_state.clone();
-    frontier.add(make_node(p, None, initial_state, 0));
+    frontier.add(make_node(p, None, initial_state));
 
     let expanded_set = if p.allow_cycles { None } else { Some(HashSet::<T>::new()) };
 
@@ -220,7 +228,8 @@ fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<Searc
         }
 
         if p.debugging {
-            println!("Expanding node with path_cost: {:.2} depth: {} ", node.path_cost, node.depth);
+            println!("Expanding node with path_cost: {:.2} ordering_cost: {:.2} depth: {} ",
+                     node.path_cost, node.ordering_cost, node.depth);
         }
         p.expansion_count += 1;
 
@@ -228,7 +237,7 @@ fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<Searc
             if p.debugging {
                 println!("");
             }
-            return Ok(node);
+            return Ok(SearchResult { leaf: node, frontier, expanded_set } );
         }
 
         if p.use_iterative_depth && node.depth >= p.current_depth_limit {
@@ -243,13 +252,13 @@ fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<Searc
 
         let mut expansion = p.expand_state(&node);
         let node = Rc::new(node);
-        while let Some((new_state, action)) = expansion.next() {
+        while let Some(new_state) = expansion.next() {
             if let Some(ref expanded_set) = expanded_set {
                 if expanded_set.contains(&new_state) {
                     continue;
                 }
             }
-            frontier.add(make_node(p, Some(node.clone()), new_state, action));
+            frontier.add(make_node(p, Some(node.clone()), new_state));
         }
 
         if p.debugging {
@@ -259,7 +268,7 @@ fn inner_tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Result<Searc
 }
 
 #[allow(dead_code)]
-pub fn tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Option<SearchNode<T>>
+pub fn tree_search<'a, T, QT>(p: &'a mut SearchProblem<T, QT>) -> Option<SearchResult<T, QT>>
     where T: Clone + Hash + Eq, QT: SearchQueue<SearchNode<T>>
 {
     p.current_depth_limit = p.iterative_depth_init;

@@ -19,6 +19,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::cell::UnsafeCell;
 use std::rc::Rc;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 use std::f32::{self, consts};
@@ -34,7 +35,7 @@ use serde::ser::{SerializeStruct, SerializeTuple};
 
 mod general_search;
 #[allow(unused_imports)]
-use general_search::{PriorityQueue, SearchProblemTrait, SearchNode,
+use general_search::{PriorityQueue, SearchQueue, SearchProblemTrait, SearchNode,
                      create_search_problem, tree_search};
 
 #[cfg(test)]
@@ -80,9 +81,27 @@ struct ConfSettings {
     total_health: u32,
     heal_reward: i32,
 
-    timestep_limit: u32,
+    forward_accel: u32,
+    backward_accel: u32,
+    max_forward_vel: u32,
+    max_backward_vel: u32,
+    brake_power: u32,
 
-    // for the MDP/Q-Learning processses
+    timestep_limit: u32,
+    reset_counters_at_timestep: u32,
+
+    // for single agent type testing
+    use_single_agent_type: bool,
+    habit_theory: f32,
+    folk_theory: f32,
+    internalization_theory: f32,
+    choice_restriction_theory: bool,
+
+    // for astar action search process "folk theory"
+    astar_depth: u32,
+    search_trip_complete_reward: f32,
+
+    // for the MDP/Q-Learning processses "habit theory"
     state_avoid_dist: u32,
     explore_one_in_max: u32,
     explore_consecutive_limit: u32,
@@ -94,14 +113,7 @@ struct ConfSettings {
     anneal_factor: f32,
     anneal_start: u32,
     anneal_end: u32,
-    reset_counters_at_timestep: u32,
     debug_choices_after: u32,
-
-    forward_accel: u32,
-    backward_accel: u32,
-    max_forward_vel: u32,
-    max_backward_vel: u32,
-    brake_power: u32,
 
     fast_steps_per_update: u32,
     slow_step_ms: u32,
@@ -494,7 +506,7 @@ fn create_map() -> WorldMap {
     map
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Hash)]
 enum AgentKind {
     Obstacle,
     Pedestrian,
@@ -505,7 +517,7 @@ impl Default for AgentKind {
     fn default() -> AgentKind { AgentKind::Obstacle }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Agent {
     kind: AgentKind,
     on_map: bool,
@@ -528,9 +540,11 @@ struct Agent {
     risk_cost: f32,
     folk_theory: f32,
     habit_theory: f32,
-    internal_theory: f32,
-    restricted_set: bool,
+    internalization_theory: f32,
+    choice_restriction_theory: bool,
 }
+
+impl Eq for Agent {}
 
 // we only serialize and send the pose (and whether agent is on map)
 impl serde::Serialize for Agent {
@@ -1346,24 +1360,38 @@ fn create_edge_walls() -> Vec<Agent> {
     agents
 }
 
+fn building_i_to_agent_i(building_i: u32) -> usize {
+    building_i as usize + C.population_n
+}
+
 fn create_agents(map: &mut WorldMap) -> Vec<Agent> {
+    debug_assert!((C.population_n % 2) == 0);
+
     let mut agents = Vec::new();
-    let p = Agent{kind: AgentKind::Pedestrian,
+    if C.use_single_agent_type {
+        let p = Agent{kind: AgentKind::Pedestrian,
                       width: PEDESTRIAN_SIZE, length: PEDESTRIAN_SIZE,
                       health: C.total_health as i32,
-                      habit_theory: 1.0,
+                      habit_theory: C.habit_theory,
+                      folk_theory: C.folk_theory,
+                      internalization_theory: C.internalization_theory,
+                      choice_restriction_theory: C.choice_restriction_theory,
                       ..Agent::default()};
-    for _ in 0..(C.population_n/2) {
-        agents.push(p.clone());
-    }
+        for _ in 0..(C.population_n/2) {
+            agents.push(p.clone());
+        }
 
-    let v = Agent{kind: AgentKind::Vehicle,
+        let v = Agent{kind: AgentKind::Vehicle,
                       width: VEHICLE_WIDTH, length: VEHICLE_LENGTH,
                       health: C.total_health as i32,
-                      habit_theory: 1.0,
+                      habit_theory: C.habit_theory,
+                      folk_theory: C.folk_theory,
+                      internalization_theory: C.internalization_theory,
+                      choice_restriction_theory: C.choice_restriction_theory,
                       ..Agent::default()};
-    for _ in 0..(C.population_n/2) {
-        agents.push(v.clone());
+        for _ in 0..(C.population_n/2) {
+            agents.push(v.clone());
+        }
     }
 
     // add buildings
@@ -1389,7 +1417,7 @@ fn setup_agents(map: &WorldMap, agents: &mut [Agent]) {
     replenish_vehicles(map, agents);
 }
 
-#[derive(Debug, Clone, Copy, Rand, PartialEq)]
+#[derive(Debug, Clone, Copy, Rand, PartialEq, Eq, Hash)]
 enum Action {
     TurnLeft,
     TurnRight,
@@ -1578,77 +1606,200 @@ fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
     weights
 }
 
-// #[derive(Clone, Eq)]
-// struct FolkSearchState {
-//
-// }
-//
-// impl PartialEq for FolkSearchState {
-//     fn eq(&self, other: &FolkSearchState) -> bool {
-//         self.0[..] == other.0[..]
-//         // let n_sections = MAP_SIZE / 32;
-//         // for i in 0..n_sections {
-//         //     let start_i = i * 32;
-//         //     let end_i = start_i + 32;
-//         //     if self.0[start_i..end_i] != other.0[start_i..end_i] {
-//         //         return false;
-//         //     }
-//         // }
-//         // return self.0[n_sections*32..] == other.0[n_sections*32..0];
-//     }
-// }
-//
-// impl Hash for FolkSearchState {
-//     fn hash<H: Hasher>(&self, state: &mut H) {
-//         self.0[..].hash(state);
-//     }
-// }
-//
-// struct MapSearchExpansion(i32);
-// impl Iterator for MapSearchExpansion {
-//     type Item = (FolkSearchState, i32);
-//     fn next(&mut self) -> Option<(FolkSearchState, i32)> {
-//         None
-//     }
-// }
-//
-// struct FolkSearchTraits;
-// impl SearchProblemTrait<FolkSearchState> for FolkSearchTraits {
-//     fn is_goal(&self, node: &SearchNode<FolkSearchState>) -> bool {
-//         node.state.0[0] == 0
-//     }
-//
-//     fn step_cost(&self, node: &SearchNode<FolkSearchState>, action: i32) -> f32 {
-//         action as f32
-//     }
-//
-//     fn ordering_cost(&self, node: &SearchNode<FolkSearchState>) -> f32 {
-//         node.path_cost
-//     }
-//
-//     fn expand_state(&self, node: &SearchNode<FolkSearchState>) -> Box<Iterator<Item = (FolkSearchState, i32)>> {
-//         Box::new(MapSearchExpansion(node.state.0[0] as i32))
-//     }
-// }
-//
-// fn create_map() {
-//     let mut p = create_search_problem::<FolkSearchState, PriorityQueue<SearchNode<FolkSearchState>>>
-//                                         (FolkSearchState([0; MAP_SIZE]), &FolkSearchTraits{}, true, true);
-//     {
-//         let result = tree_search(&mut p);
-//         if let Some(sol) = result {
-//             println!("Found solution with cost {:.2} at depth {} after expanding {} nodes", sol.path_cost, sol.depth, sol.get_expansion_count());
-//             return;
-//         }
-//     }
-//     println!("Falied to find solution after expanding {} nodes", p.get_expansion_count())
-// }
+#[derive(Clone, Eq)]
+struct FolkSearchState {
+    forward_predictions: Rc<Vec<Vec<Agent>>>,
+    agents: Vec<Agent>,
+    agent_i: usize,
+    action: Action,
+    depth: u32,
+}
 
-fn folk_theory_weights(_agents: &[Agent], actions: &[Action], agent: &Agent) -> Vec<f32> {
+impl PartialEq for FolkSearchState {
+    fn eq(&self, other: &FolkSearchState) -> bool {
+        self.agents == other.agents &&
+            self.agent_i == other.agent_i &&
+            self.action == other.action &&
+            self.depth == other.depth
+    }
+}
+
+impl Hash for FolkSearchState {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let agent = self.agents[self.agent_i];
+        agent.pose.hash(state);
+        agent.health.hash(state);
+        self.agent_i.hash(state);
+        self.action.hash(state);
+        self.depth.hash(state);
+    }
+}
+
+struct MapSearchExpansion {
+    state: FolkSearchState,
+    possible_actions: Vec<Action>,
+    expansion_i: usize,
+}
+
+impl Iterator for MapSearchExpansion {
+    type Item = FolkSearchState;
+    fn next(&mut self) -> Option<FolkSearchState> {
+        let action = *self.possible_actions.get(self.expansion_i)?;
+        let forward_predictions = self.state.forward_predictions.clone();
+        let agent_i = self.state.agent_i;
+        let depth = self.state.depth + 1;
+
+        // construct new agent set from the already calculated set
+        // plus this specific agent from the parent state
+        let mut agents = forward_predictions[(depth as usize - 1).min(forward_predictions.len() - 1)].clone();
+        agents[agent_i] = self.state.agents[agent_i];
+        apply_action(&mut agents[agent_i], action);
+
+        self.expansion_i += 1;
+
+        Some(FolkSearchState { forward_predictions, agents, agent_i, action, depth })
+    }
+}
+
+struct FolkSearchTraits;
+impl SearchProblemTrait<FolkSearchState> for FolkSearchTraits {
+    fn is_goal(&self, node: &SearchNode<FolkSearchState>) -> bool {
+        node.state.depth == C.astar_depth
+
+        // let state = &node.state;
+        // let agent = state.agents[state.agent_i];
+        // let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
+        // let building_agent = state.agents[building_agent_i];
+        // let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
+        //                       building_agent.pose, (building_agent.width, building_agent.length));
+        //
+        // let building_margin = if agent.kind == AgentKind::Pedestrian
+        //                         { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
+        //
+        // dist <= building_margin
+    }
+
+    fn step_cost(&self, node: &SearchNode<FolkSearchState>) -> f32 {
+        let state = &node.state;
+        let collisions = find_collisions_with(&state.agents, Some(state.agent_i));
+        let mut collision_cost = 0.0;
+        for c in collisions {
+            if c.agent1_i == state.agent_i {
+                collision_cost += c.damage1 as f32;
+            }
+            if c.agent2_i == state.agent_i {
+                collision_cost += c.damage2 as f32;
+            }
+        }
+        1.0 + collision_cost
+    }
+
+    fn ordering_cost(&self, node: &SearchNode<FolkSearchState>) -> f32 {
+        let mut heuristic_cost = 0.0;
+        let state = &node.state;
+        let agent = state.agents[state.agent_i];
+        let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
+        let building_agent = state.agents[building_agent_i];
+        let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
+                              building_agent.pose, (building_agent.width, building_agent.length));
+        heuristic_cost += dist as f32 / C.max_forward_vel as f32;
+
+        let building_margin = if agent.kind == AgentKind::Pedestrian
+                                { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
+        if dist <= building_margin {
+            heuristic_cost -= C.search_trip_complete_reward;
+        }
+        node.path_cost + heuristic_cost
+    }
+
+    fn expand_state(&self, node: &SearchNode<FolkSearchState>) -> Box<Iterator<Item = FolkSearchState>> {
+        let state = node.state.clone();
+        let possible_actions = get_possible_actions(&state.agents[state.agent_i]);
+        Box::new(MapSearchExpansion{state, possible_actions, expansion_i: 0})
+    }
+}
+
+fn get_search_node_first_action(node: Rc<SearchNode<FolkSearchState>>) -> Action {
+    let mut node = node;
+    loop {
+        if node.depth == 1 {
+            return node.state.action;
+        }
+        if node.parent.is_none() {
+            panic!("Expected a parent node!");
+        }
+        node = node.parent.as_ref().unwrap().clone();
+    }
+}
+
+fn folk_theory_weights(agents: &[Agent], forward_predictions: Rc<Vec<Vec<Agent>>>,
+                       actions: &[Action], agent_i: usize) -> Vec<f32> {
     let mut weights = vec![0.0; actions.len()];
+    let agent = &agents[agent_i];
     if agent.folk_theory == 0.0 {
         return weights;
     }
+
+    let initial_state = FolkSearchState{ forward_predictions, agents: agents.to_vec(), agent_i,
+                                         action: Action::Nothing, depth: 0 };
+
+    let mut p = create_search_problem::<FolkSearchState, PriorityQueue<SearchNode<FolkSearchState>>>
+                                        (initial_state, &FolkSearchTraits{}, true, false);
+    {
+        let result = tree_search(&mut p);
+        if let Some(sol) = result {
+            let sol_node = sol.leaf;
+            // println!("Found solution with ordering cost {:.2} at depth {} after expanding {} nodes", sol_node.ordering_cost, sol_node.depth, sol_node.get_expansion_count());
+            let rc_sol = Rc::new(sol_node);
+
+            let action = get_search_node_first_action(rc_sol.clone());
+            let action_i = actions.iter().position(|&a| a == action).unwrap();
+            weights[action_i] = rc_sol.ordering_cost;
+
+            let mut node = rc_sol.clone();
+            loop {
+                // println!("Action {:?} at depth {}", node.state.action, node.depth);
+                if node.parent.is_none() {
+                    break;
+                }
+                node = node.parent.as_ref().unwrap().clone();
+            }
+
+            let mut frontier = sol.frontier;
+            let mut max_found_val = 0.0; // its a min-heap, so the last value
+            loop {
+                let node = frontier.remove_next();
+                if node.is_none() {
+                    break;
+                }
+                let node = node.unwrap();
+                max_found_val = node.ordering_cost;
+
+                if !p.is_goal(&node) {
+                    continue;
+                }
+                let node = Rc::new(node);
+                let action = get_search_node_first_action(node.clone());
+                let action_i = actions.iter().position(|&a| a == action).unwrap();
+                if weights[action_i] == 0.0 || node.ordering_cost < weights[action_i] {
+                    weights[action_i] = node.ordering_cost;
+                    // println!("Put {} for action {:?}", node.ordering_cost, action);
+                }
+            }
+
+            // fill in the values empty values
+            for i in 0..weights.len() {
+                if weights[i] == 0.0 {
+                    weights[i] = max_found_val;
+                }
+                // and invert values since astar minimizes and we want positive to be good
+                weights[i] = -weights[i];
+            }
+
+            return weights;
+        };
+    }
+    println!("Falied to find solution after expanding {} nodes", p.get_expansion_count());
 
     weights
 }
@@ -1686,7 +1837,8 @@ fn get_possible_actions(agent: &Agent) -> Vec<Action> {
 }
 
 fn choose_action(_map: &WorldMap, q: &mut QLearning,
-                 agents: &mut [Agent], agent_dists: &AgentDistanceTable, agent_i: usize) -> Action {
+                 agents: &mut [Agent], agent_dists: &AgentDistanceTable,
+                 forward_predictions: Rc<Vec<Vec<Agent>>>, agent_i: usize) -> Action {
     let actions;
     let choices = {
         let agent = &agents[agent_i];
@@ -1701,7 +1853,7 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         actions = get_possible_actions(agent);
 
         let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
-        let folk_w = folk_theory_weights(agents, &actions, agent);
+        let folk_w = folk_theory_weights(agents, forward_predictions, &actions, agent_i);
         let internal_w = internalization_theory_weights(agents, &actions, agent);
         let mut weights = habit_w;
         for i in 0..weights.len() {
@@ -1786,8 +1938,7 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
             println!("Made decision randomly");
         }
         return *rng.choose(&actions).unwrap();
-    } else {
-
+    } else if agent.habit_theory != 0.0 {
         let anneal_start_end = (C.anneal_start - C.anneal_end) as f32;
         let mult_factor = (C.anneal_factor - 1.0) / anneal_start_end;
         let anneal_factor = 1.0 + (q.avoid_empties - C.anneal_end).max(0) as f32 * mult_factor;
@@ -1811,10 +1962,18 @@ fn choose_action(_map: &WorldMap, q: &mut QLearning,
         }
         return choices[choice_i].0;
         // return best_choice.0;
+    } else {
+        let best_choice = choices.iter().fold((Action::Nothing, f32::MIN),
+                                              |a, &c| if c.1 > a.1 { c } else { a });
+        if rng.gen_weighted_bool(10000) {
+            println!("Made deterministic folk theory choice to use {:?}", best_choice.0);
+            println!("From choices: {:?}", choices);
+        }
+        return best_choice.0;
     }
 }
 
-fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
+fn apply_action(agent: &mut Agent, action: Action) {
     match action {
         Action::TurnLeft => {
             let rot_pt1 = rotate_pt((agent.width as f32 / 2.0,
@@ -1876,12 +2035,43 @@ fn apply_action(_map: &WorldMap, agent: &mut Agent, action: Action) {
     agent.pose.1 = new_y as u32;
 }
 
+fn simple_forward_timestep(agents: &[Agent]) -> Vec<Agent> {
+    let mut new_agents = Vec::with_capacity(agents.len());
+    for i in 0..agents.len() {
+        let mut new_agent = agents[i];
+        if new_agent.on_map && new_agent.frozen_steps == 0 && new_agent.kind != AgentKind::Obstacle {
+            apply_action(&mut new_agent, Action::Continue);
+        }
+        new_agents.push(new_agent);
+    }
+    new_agents
+}
+
+fn calc_forward_predictions(agents: &[Agent]) -> Vec<Vec<Agent>> {
+    if C.use_single_agent_type && C.folk_theory == 0.0 {
+        return Vec::new();
+    }
+    let mut forward_predictions: Vec<Vec<Agent>> = Vec::new();
+    for i in 0..C.astar_depth {
+        let next_agents;
+        if i == 0 {
+            next_agents = simple_forward_timestep(agents);
+        } else {
+            next_agents = simple_forward_timestep(forward_predictions.last().unwrap());
+        }
+        forward_predictions.push(next_agents);
+    }
+    forward_predictions
+}
+
 fn update_agents(map: &WorldMap, q: &mut QLearning,
                  agents: &mut [Agent], agent_dists: &AgentDistanceTable) -> Vec<Action> {
+    let forward_predictions = Rc::new(calc_forward_predictions(agents));
     let actions = (0..agents.len()).map(|i|
-                            choose_action(map, q, agents, agent_dists, i)).collect::<Vec<_>>();
+                            choose_action(map, q, agents, agent_dists,
+                                          forward_predictions.clone(), i)).collect::<Vec<_>>();
     for (i, &action) in actions.iter().enumerate() {
-        apply_action(map, &mut agents[i], action);
+        apply_action(&mut agents[i], action);
 
         if action == Action::Frozen && agents[i].frozen_steps == 0 {
             if agents[i].health == 0 {
