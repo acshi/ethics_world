@@ -196,6 +196,8 @@ fn make_node<'a, T, QT>(p: &'a mut SearchProblem<T, QT>, parent: Option<Rc<Searc
     if let Some(ref parent) = node.parent {
         node.depth = parent.depth + 1;
         node.path_cost = parent.path_cost + p.step_cost(&node);
+    } else {
+        node.path_cost = p.step_cost(&node);
     }
     node.ordering_cost = p.ordering_cost(&node);
     node

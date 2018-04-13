@@ -18,12 +18,20 @@ reset_counters_at_timestep = 5000000
 # for a single agent type setup
 use_single_agent_type = true
 habit_theory = 0.0
-folk_theory = 1.0
-internalization_theory = 0.0
+folk_theory = 0.0
+internalization_theory = 1.0
 choice_restriction_theory = false
 
+# for the intrinsic moral value search processes
+off_path_penalty = 1 # per pixel, vehicle on sidewalk, pedestrian on road (not sidewalk)
+off_lane_penalty = 0.75
+damage_penalty = 1 # damage multiplier for setting scale
+# if an agent is "stuck" -- the best option is to not move
+# then actions no worse than this can be additionally considered
+moral_forgiveness = -8
+
 # for the A-star search processes
-astar_depth = 3
+astar_depth = 4
 search_trip_complete_reward = 100
 
 # for the MDP/Q-Learning processses
@@ -50,7 +58,8 @@ anneal_end = 700 #5800 #2100 #300
 
 debug_choices_after = 730 #4000 #520
 
-fast_steps_per_update = 400 # number of timesteps between chances for visualization output
+# 400 worked well for q learning, but other stuff needs less
+fast_steps_per_update = 10 # number of timesteps between chances for visualization output
 slow_step_ms = 20 # real time per simulated timestep for visualization
 
  # num timesteps between q avoid table empties recalculation,

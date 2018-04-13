@@ -75,6 +75,8 @@ function render() {
         ctx.font = "30px Arial";
         ctx.textBaseline = "top";
         ctx.fillText("" + a.health, 5, 5);
+        ctx.font = "16px Arial";
+        ctx.fillText("" + i, 5, 65);
         ctx.fillStyle = "#00ffff";
         ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to identity
 
@@ -120,6 +122,7 @@ function update_stats() {
     document.getElementById("deaths").innerHTML = "Deaths: <b>" + document.stats.deaths + "</b>";
     document.getElementById("collisions").innerHTML = "Collisions: <b>" + document.stats.collisions + "</b>";
     document.getElementById("trips_completed").innerHTML = "Trips Completed: <b>" + document.stats.trips_completed + "</b>";
+    document.getElementById("timesteps").innerHTML = "Timestep: <b>" + document.stats.timesteps + "</b>";
 }
 
 function update() {

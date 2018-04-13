@@ -211,9 +211,8 @@ fn test_initially_unoccupied() {
 
     let agents = create_agents(&mut map);
 
-    let path_width = map.vert_sidewalk_width.max(map.horiz_sidewalk_width);
-    let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, path_width, false);
-    let on_inner = calc_occupied_perim_map(&agents, &map.vehicle_inner_pts, path_width, true);
+    let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, false);
+    let on_inner = calc_occupied_perim_map(&agents, &map.vehicle_inner_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, true);
 
     assert!(on_outer.iter().all(|&b| !b));
     assert!(on_inner.iter().all(|&b| !b));
@@ -254,9 +253,8 @@ fn test_spawn_pedestrian() {
         }
         let agent_i = agent_i.unwrap();
 
-        let path_width = map.vert_sidewalk_width.max(map.horiz_sidewalk_width);
-        let on_outer = calc_occupied_perim_map(&agents, &map.pedestrian_outer_pts, path_width, false);
-        let on_inner = calc_occupied_perim_map(&agents, &map.pedestrian_inner_pts, path_width, true);
+        let on_outer = calc_occupied_perim_map(&agents, &map.pedestrian_outer_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, false);
+        let on_inner = calc_occupied_perim_map(&agents, &map.pedestrian_inner_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, true);
 
         let spawn_result = spawn_on_two_perims(&map, &map.buildings, BUILDING_PEDESTRIAN_MARGIN,
                                            (PEDESTRIAN_SIZE, PEDESTRIAN_SIZE),
@@ -285,13 +283,13 @@ fn test_spawn_pedestrian() {
             println!("Examining agent with rect: {:?}", agent_rect);
         }
 
-        let on_outer = calc_occupied_perim_map(&agents, &map.pedestrian_outer_pts, path_width, false);
+        let on_outer = calc_occupied_perim_map(&agents, &map.pedestrian_outer_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, false);
 
         // for _ in 0..10 {
         //     println!("*** Looking at inner now! ***");
         // }
 
-        let on_inner = calc_occupied_perim_map(&agents, &map.pedestrian_inner_pts, path_width, true);
+        let on_inner = calc_occupied_perim_map(&agents, &map.pedestrian_inner_pts, map.horiz_sidewalk_width, map.vert_sidewalk_width, true);
 
         for (i, &b) in on_inner.iter().enumerate() {
             if b {
@@ -334,9 +332,8 @@ fn test_spawn_vehicle() {
             }
             let agent_i = agent_i.unwrap();
 
-            let path_width = map.vert_road_width.max(map.horiz_road_width) / 2;
-            let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, path_width, false);
-            let on_inner = calc_occupied_perim_map(&agents, &map.vehicle_inner_pts, path_width, true);
+            let on_outer = calc_occupied_perim_map(&agents, &map.vehicle_outer_pts, map.horiz_road_width, map.vert_road_width, false);
+            let on_inner = calc_occupied_perim_map(&agents, &map.vehicle_inner_pts, map.horiz_road_width, map.vert_road_width, true);
             let spawn_result = spawn_on_two_perims(&map, &map.buildings, BUILDING_VEHICLE_MARGIN,
                                                (VEHICLE_WIDTH, VEHICLE_LENGTH),
                                                &map.vehicle_outer_pts, &map.vehicle_inner_pts,
