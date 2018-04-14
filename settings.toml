@@ -7,7 +7,7 @@ heal_reward = 35
 forward_accel = 1
 backward_accel = 1
 max_forward_vel = 3
-max_backward_vel = 3
+max_backward_vel = 1
 brake_power = 2
 
 # for repeatable testing
@@ -17,8 +17,8 @@ reset_counters_at_timestep = 5000000
 
 # for a single agent type setup
 use_single_agent_type = true
-habit_theory = 0.0
-folk_theory = 0.0
+habit_theory = 1.0
+folk_theory = 0.05
 internalization_theory = 1.0
 choice_restriction_theory = false
 
@@ -29,9 +29,11 @@ damage_penalty = 1 # damage multiplier for setting scale
 # if an agent is "stuck" -- the best option is to not move
 # then actions no worse than this can be additionally considered
 moral_forgiveness = -8
+# a penalty for when an agent sees itself as stuck (repeating pose/velocity) in the search
+stuck_penalty = 10 # unused right now!!!
 
 # for the A-star search processes
-astar_depth = 4
+astar_depth = 5
 search_trip_complete_reward = 100
 
 # for the MDP/Q-Learning processses

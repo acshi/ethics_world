@@ -102,6 +102,7 @@ struct ConfSettings {
     off_lane_penalty: f32,
     damage_penalty: f32,
     moral_forgiveness: f32,
+    stuck_penalty: f32,
 
     // for astar action search process "folk theory"
     astar_depth: u32,
@@ -1056,6 +1057,15 @@ fn overlaps_rect(q1: &RectF32, q2: &RectF32) -> bool {
     overlaps_rect_check_normals(q1, q2, &normals2)
 }
 
+// specialized/optimized version of overlaps_rect
+// makes the assumption that q1 is of an agent (vehicle/pedestrian) with known theta/angle
+// and that q2 is axis aligned. (no rotation)
+fn agent_overlaps_axis_rect(q1: &RectF32, theta: u32, q2: &RectF32) -> bool {
+    let theta = theta as f32 * THETA_PER_INC;
+    let normals = [-theta, -theta + consts::PI / 2.0, 0.0, consts::PI / 2.0];
+    overlaps_rect_check_normals(q1, q2, &normals)
+}
+
 fn agent_to_rect32(agent: &Agent) -> RectF32 {
     let (width, length) = (agent.width as f32, agent.length as f32);
     let (x, y, theta) = (agent.pose.0 as f32, agent.pose.1 as f32,
@@ -1869,7 +1879,7 @@ fn folk_theory_weights(map: &WorldMap, agents: &[Agent], forward_predictions: Rc
                     weights[i] = max_found_val;
                 }
                 // and invert values since astar minimizes and we want positive to be good
-                weights[i] = -weights[i];
+                weights[i] = agent.folk_theory * -weights[i];
             }
 
             return weights;
@@ -1934,6 +1944,25 @@ fn agent_contained_in_corner(map: &WorldMap, agent: &Agent) -> bool {
     map.corners.iter().any(|c| agent_contained_in_bounds(agent, c))
 }
 
+// fn agent_repeats_lower_depth(node: Rc<SearchNode<SearchState>>) -> bool {
+//     let agent = &node.state.agents[node.state.agent_i].clone();
+//     let pose = agent.pose;
+//     // let vel = agent.velocity;
+//     // too easy to repeat in a manner that dances around having the same exact pose _and_ velocity.
+//     let mut node = node;
+//     loop {
+//         if node.parent.is_none() {
+//             return false;
+//         }
+//         node = node.parent.as_ref().unwrap().clone();
+//
+//         let agent = &node.state.agents[node.state.agent_i];
+//         if pose == agent.pose { // && vel == agent.velocity {
+//             return true;
+//         }
+//     }
+// }
+
 struct MoralSearchTraits;
 impl SearchProblemTrait<SearchState> for MoralSearchTraits {
     fn is_goal(&self, node: &SearchNode<SearchState>) -> bool {
@@ -1969,11 +1998,11 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
 
         // which segment(s) of the road is the vehicle on/by?
         let map = &state.map;
-        let on_inner_segment = (0..4).map(|i| overlaps_rect(&rect, &map.vehicle_inner_rects[i]))
+        let on_inner_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_inner_rects[i]))
                                      .collect::<Vec<_>>();
-        let on_outer_segment = (0..4).map(|i| overlaps_rect(&rect, &map.vehicle_outer_rects[i]))
+        let on_outer_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_outer_rects[i]))
                                      .collect::<Vec<_>>();
-        //
+
         // let on_inner_corner = on_inner_segment.iter().filter(|&&b| b).count() > 1;
         let in_corner = agent_contained_in_corner(map, agent);
 
@@ -2012,12 +2041,15 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
             }
         }
 
+        // are we stuck? did we at a lower depth already have this pose?
+        // let stuck_cost = if agent_repeats_lower_depth(Rc::new(node.clone())) { C.stuck_penalty } else { 0.0 };
+
         // dismiss very minor misplacements... maybe no the best way to do this...
         // if location_cost <= C.off_lane_penalty && location_cost <= C.off_path_penalty {
         //     location_cost = 0.0;
         // }
 
-        collision_cost + location_cost
+        collision_cost + location_cost // + stuck_cost
     }
 
     fn ordering_cost(&self, node: &SearchNode<SearchState>) -> f32 {
@@ -2040,6 +2072,9 @@ fn internalization_theory_weights(map: &WorldMap, agents: &[Agent],
         return weights;
     }
 
+    let mut rng = repeatable_rand();
+    let debug_print = rng.gen_weighted_bool(10000);
+
     let map = Rc::new(map.clone());
     for action_i in 0..actions.len() {
         let action = actions[action_i];
@@ -2057,8 +2092,18 @@ fn internalization_theory_weights(map: &WorldMap, agents: &[Agent],
             let result = tree_search(&mut p);
             if let Some(sol) = result {
                 let sol_node = sol.leaf;
-                // println!("Found solution with ordering cost {:.2} at depth {} after expanding {} nodes", sol_node.ordering_cost, sol_node.depth, sol_node.get_expansion_count());
-                weights[action_i] = -sol_node.ordering_cost;
+                weights[action_i] = agent.internalization_theory * -sol_node.ordering_cost;
+                if debug_print {
+                    println!("Found solution with ordering cost {:.2} at depth {} after expanding {} nodes", sol_node.ordering_cost, sol_node.depth, sol_node.get_expansion_count());
+                    let mut node = Rc::new(sol_node.clone());
+                    loop {
+                        println!("Action {:?} at depth {}", node.state.action, node.depth);
+                        if node.parent.is_none() {
+                            break;
+                        }
+                        node = node.parent.as_ref().unwrap().clone();
+                    }
+                }
                 continue;
             };
         }
