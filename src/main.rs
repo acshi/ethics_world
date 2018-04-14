@@ -1746,150 +1746,6 @@ impl Iterator for SearchExpansion {
     }
 }
 
-struct FolkSearchTraits;
-impl SearchProblemTrait<SearchState> for FolkSearchTraits {
-    fn is_goal(&self, node: &SearchNode<SearchState>) -> bool {
-        node.state.depth == C.astar_depth
-
-        // let state = &node.state;
-        // let agent = state.agents[state.agent_i];
-        // let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
-        // let building_agent = state.agents[building_agent_i];
-        // let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
-        //                       building_agent.pose, (building_agent.width, building_agent.length));
-        //
-        // let building_margin = if agent.kind == AgentKind::Pedestrian
-        //                         { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
-        //
-        // dist <= building_margin
-    }
-
-    fn step_cost(&self, node: &SearchNode<SearchState>) -> f32 {
-        let state = &node.state;
-        let collisions = find_collisions_with(&state.agents, Some(state.agent_i));
-        let mut collision_cost = 0.0;
-        for c in collisions {
-            if c.agent1_i == state.agent_i {
-                collision_cost += c.damage1 as f32;
-            }
-            if c.agent2_i == state.agent_i {
-                collision_cost += c.damage2 as f32;
-            }
-        }
-        1.0 + collision_cost
-    }
-
-    fn ordering_cost(&self, node: &SearchNode<SearchState>) -> f32 {
-        let mut heuristic_cost = 0.0;
-        let state = &node.state;
-        let agent = state.agents[state.agent_i];
-        let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
-        let building_agent = state.agents[building_agent_i];
-        let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
-                              building_agent.pose, (building_agent.width, building_agent.length));
-        heuristic_cost += dist as f32 / C.max_forward_vel as f32;
-
-        let building_margin = if agent.kind == AgentKind::Pedestrian
-                                { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
-        if dist <= building_margin {
-            heuristic_cost -= C.search_trip_complete_reward;
-        }
-        node.path_cost + heuristic_cost
-    }
-
-    fn expand_state(&self, node: &SearchNode<SearchState>) -> Box<Iterator<Item = SearchState>> {
-        let state = node.state.clone();
-        let possible_actions = get_possible_actions(&state.agents[state.agent_i]);
-        Box::new(SearchExpansion{state, possible_actions, expansion_i: 0})
-    }
-}
-
-fn get_search_node_first_action(node: Rc<SearchNode<SearchState>>) -> Action {
-    let mut node = node;
-    loop {
-        if node.depth == 1 {
-            return node.state.action;
-        }
-        if node.parent.is_none() {
-            panic!("Expected a parent node!");
-        }
-        node = node.parent.as_ref().unwrap().clone();
-    }
-}
-
-fn folk_theory_weights(map: &WorldMap, agents: &[Agent], forward_predictions: Rc<Vec<Vec<Agent>>>,
-                       actions: &[Action], agent_i: usize) -> Vec<f32> {
-    let mut weights = vec![0.0; actions.len()];
-    let agent = &agents[agent_i];
-    if agent.folk_theory == 0.0 {
-        return weights;
-    }
-
-    let map = Rc::new(map.clone());
-    let initial_state = SearchState { map, forward_predictions, agents: agents.to_vec(), agent_i,
-                                         action: Action::Nothing, depth: 0 };
-
-    let mut p = create_search_problem::<SearchState, PriorityQueue<SearchNode<SearchState>>>
-                                        (initial_state, &FolkSearchTraits{}, true, false);
-    {
-        let result = tree_search(&mut p);
-        if let Some(sol) = result {
-            let sol_node = sol.leaf;
-            // println!("Found solution with ordering cost {:.2} at depth {} after expanding {} nodes", sol_node.ordering_cost, sol_node.depth, sol_node.get_expansion_count());
-            let rc_sol = Rc::new(sol_node);
-
-            let action = get_search_node_first_action(rc_sol.clone());
-            let action_i = actions.iter().position(|&a| a == action).unwrap();
-            weights[action_i] = rc_sol.ordering_cost;
-
-            // let mut node = rc_sol.clone();
-            // loop {
-            //     println!("Action {:?} at depth {}", node.state.action, node.depth);
-            //     if node.parent.is_none() {
-            //         break;
-            //     }
-            //     node = node.parent.as_ref().unwrap().clone();
-            // }
-
-            let mut frontier = sol.frontier;
-            let mut max_found_val = 0.0; // its a min-heap, so the last value
-            loop {
-                let node = frontier.remove_next();
-                if node.is_none() {
-                    break;
-                }
-                let node = node.unwrap();
-                max_found_val = node.ordering_cost;
-
-                if !p.is_goal(&node) {
-                    continue;
-                }
-                let node = Rc::new(node);
-                let action = get_search_node_first_action(node.clone());
-                let action_i = actions.iter().position(|&a| a == action).unwrap();
-                if weights[action_i] == 0.0 || node.ordering_cost < weights[action_i] {
-                    weights[action_i] = node.ordering_cost;
-                    // println!("Put {} for action {:?}", node.ordering_cost, action);
-                }
-            }
-
-            // fill in the values empty values
-            for i in 0..weights.len() {
-                if weights[i] == 0.0 {
-                    weights[i] = max_found_val;
-                }
-                // and invert values since astar minimizes and we want positive to be good
-                weights[i] = agent.folk_theory * -weights[i];
-            }
-
-            return weights;
-        };
-    }
-    println!("Falied to find solution after expanding {} nodes", p.get_expansion_count());
-
-    weights
-}
-
 fn rasterize_poly_line(buff_x0: &mut [i32], buff_x1: &mut [i32], start_x: i32, start_y: i32, end_x: i32, end_y: i32) {
     // Bresenham's Line Drawing, as applied to rasterizing a convex polygon
     // use for rasterizing like with https://stackoverflow.com/questions/10061146/how-to-rasterize-rotated-rectangle-in-2d-by-setpixel
@@ -1944,116 +1800,158 @@ fn agent_contained_in_corner(map: &WorldMap, agent: &Agent) -> bool {
     map.corners.iter().any(|c| agent_contained_in_bounds(agent, c))
 }
 
-// fn agent_repeats_lower_depth(node: Rc<SearchNode<SearchState>>) -> bool {
-//     let agent = &node.state.agents[node.state.agent_i].clone();
-//     let pose = agent.pose;
-//     // let vel = agent.velocity;
-//     // too easy to repeat in a manner that dances around having the same exact pose _and_ velocity.
-//     let mut node = node;
-//     loop {
-//         if node.parent.is_none() {
-//             return false;
-//         }
-//         node = node.parent.as_ref().unwrap().clone();
-//
-//         let agent = &node.state.agents[node.state.agent_i];
-//         if pose == agent.pose { // && vel == agent.velocity {
-//             return true;
-//         }
-//     }
-// }
+fn folk_step_cost(node: &SearchNode<SearchState>, collisions: &[Collision]) -> f32 {
+    let state = &node.state;
+    let mut collision_cost = 0.0;
+    for c in collisions {
+        if c.agent1_i == state.agent_i {
+            collision_cost += c.damage1 as f32;
+        }
+        if c.agent2_i == state.agent_i {
+            collision_cost += c.damage2 as f32;
+        }
+    }
+    1.0 + collision_cost
+}
+
+fn folk_heuristic_cost(node: &SearchNode<SearchState>) -> f32 {
+    let mut heuristic_cost = 0.0;
+    let state = &node.state;
+    let agent = state.agents[state.agent_i];
+    let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
+    let building_agent = state.agents[building_agent_i];
+    let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
+                          building_agent.pose, (building_agent.width, building_agent.length));
+    heuristic_cost += dist as f32 / C.max_forward_vel as f32;
+
+    let building_margin = if agent.kind == AgentKind::Pedestrian
+                            { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
+    if dist <= building_margin {
+        heuristic_cost -= C.search_trip_complete_reward;
+    }
+    heuristic_cost
+}
+
+fn internalization_step_cost(node: &SearchNode<SearchState>, collisions: &[Collision]) -> f32 {
+    let state = &node.state;
+    let mut collision_cost = 0.0;
+    for c in collisions {
+        if c.agent1_i == state.agent_i {
+            collision_cost += c.damage1 as f32 * C.damage_penalty;
+        }
+        if c.agent2_i == state.agent_i {
+            collision_cost += c.damage2 as f32 * C.damage_penalty;
+        }
+    }
+
+    // rasterize agent over the map to see if the locations are all okay
+    let agent = &state.agents[state.agent_i];
+    let rect = agent_to_rect32(agent);
+    let mut buff_x0 = [-1i32; MAP_HEIGHT as usize];
+    let mut buff_x1 = [-1i32; MAP_HEIGHT as usize];
+    for i in 0..4 {
+        let pt1 = rect[i];
+        let pt2 = rect[(i + 1) % 4];
+        rasterize_poly_line(&mut buff_x0, &mut buff_x1,
+                            pt1.0 as i32, pt1.1 as i32, pt2.0 as i32, pt2.1 as i32);
+    }
+
+    let mut location_cost = 0.0;
+
+    // which segment(s) of the road is the vehicle on/by?
+    let map = &state.map;
+    let on_inner_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_inner_rects[i]))
+                                 .collect::<Vec<_>>();
+    let on_outer_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_outer_rects[i]))
+                                 .collect::<Vec<_>>();
+
+    // let on_inner_corner = on_inner_segment.iter().filter(|&&b| b).count() > 1;
+    let in_corner = agent_contained_in_corner(map, agent);
+
+    // the indexes for the directions on the inner (clockwise) path
+    // the counter-clockwise ones will have 3 and 1 swapped and 2 and 0 swapped.
+    let agent_dir = if agent.pose.2 < PI_OVER_TWO_INCS / 2 { 3 }
+                    else if agent.pose.2 < PI_OVER_TWO_INCS * 3 / 2 { 2 }
+                    else if agent.pose.2 < PI_OVER_TWO_INCS * 5 / 2 { 1 }
+                    else { 0 };
+
+    let map = &state.map;
+    for y in 0..MAP_HEIGHT {
+        let x0 = buff_x0[y as usize].max(0) as u32;
+        let x1 = buff_x1[y as usize].max(0) as u32;
+        for x in x0..x1 {
+            let cell = map.grid[(y * MAP_WIDTH + x) as usize];
+            if agent.kind == AgentKind::Pedestrian &&
+                    cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) &&
+                    !cell.intersects(Cell::CROSSWALK) {
+               location_cost += C.off_path_penalty
+            }
+            if agent.kind == AgentKind::Vehicle {
+                if !cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) {
+                    location_cost += C.off_path_penalty
+                }
+
+                // INNER_LANE goes clock-wise
+                if cell.intersects(Cell::INNER_LANE) && !on_inner_segment[agent_dir] {
+                    location_cost += C.off_lane_penalty;
+                }
+                // we allow _any_ direction at the outerlane corners! (for switching lanes)
+                if !in_corner && cell.intersects(Cell::OUTER_LANE) && !on_outer_segment[(agent_dir + 2) % 4] {
+                    location_cost += C.off_lane_penalty;
+                }
+            }
+        }
+    }
+
+    // are we stuck? did we at a lower depth already have this pose?
+    // let stuck_cost = if agent_repeats_lower_depth(Rc::new(node.clone())) { C.stuck_penalty } else { 0.0 };
+
+    // dismiss very minor misplacements... maybe no the best way to do this...
+    // if location_cost <= C.off_lane_penalty && location_cost <= C.off_path_penalty {
+    //     location_cost = 0.0;
+    // }
+
+    collision_cost + location_cost // + stuck_cost
+}
 
 struct MoralSearchTraits;
 impl SearchProblemTrait<SearchState> for MoralSearchTraits {
     fn is_goal(&self, node: &SearchNode<SearchState>) -> bool {
-        node.state.depth == C.astar_depth
+        node.state.depth == C.astar_depth || node.path_cost.is_infinite()
     }
 
     fn step_cost(&self, node: &SearchNode<SearchState>) -> f32 {
         let state = &node.state;
         let collisions = find_collisions_with(&state.agents, Some(state.agent_i));
-        let mut collision_cost = 0.0;
-        for c in collisions {
-            if c.agent1_i == state.agent_i {
-                collision_cost += c.damage1 as f32 * C.damage_penalty;
-            }
-            if c.agent2_i == state.agent_i {
-                collision_cost += c.damage2 as f32 * C.damage_penalty;
-            }
+
+        let agent = state.agents[state.agent_i];
+        let folk_cost = if agent.folk_theory == 0.0 {
+            0.0
+        } else {
+            agent.folk_theory * folk_step_cost(node, &collisions)
+        };
+        let internalization_cost = if agent.internalization_theory == 0.0 {
+            0.0
+        } else {
+            agent.internalization_theory * internalization_step_cost(node, &collisions)
+        };
+        if agent.choice_restriction_theory && internalization_cost > 0.0 {
+            return f32::INFINITY;
         }
-
-        // rasterize agent over the map to see if the locations are all okay
-        let agent = &state.agents[state.agent_i];
-        let rect = agent_to_rect32(agent);
-        let mut buff_x0 = [-1i32; MAP_HEIGHT as usize];
-        let mut buff_x1 = [-1i32; MAP_HEIGHT as usize];
-        for i in 0..4 {
-            let pt1 = rect[i];
-            let pt2 = rect[(i + 1) % 4];
-            rasterize_poly_line(&mut buff_x0, &mut buff_x1,
-                                pt1.0 as i32, pt1.1 as i32, pt2.0 as i32, pt2.1 as i32);
-        }
-
-        let mut location_cost = 0.0;
-
-        // which segment(s) of the road is the vehicle on/by?
-        let map = &state.map;
-        let on_inner_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_inner_rects[i]))
-                                     .collect::<Vec<_>>();
-        let on_outer_segment = (0..4).map(|i| agent_overlaps_axis_rect(&rect, agent.pose.2, &map.vehicle_outer_rects[i]))
-                                     .collect::<Vec<_>>();
-
-        // let on_inner_corner = on_inner_segment.iter().filter(|&&b| b).count() > 1;
-        let in_corner = agent_contained_in_corner(map, agent);
-
-        // the indexes for the directions on the inner (clockwise) path
-        // the counter-clockwise ones will have 3 and 1 swapped and 2 and 0 swapped.
-        let agent_dir = if agent.pose.2 < PI_OVER_TWO_INCS / 2 { 3 }
-                        else if agent.pose.2 < PI_OVER_TWO_INCS * 3 / 2 { 2 }
-                        else if agent.pose.2 < PI_OVER_TWO_INCS * 5 / 2 { 1 }
-                        else { 0 };
-
-        let map = &state.map;
-        for y in 0..MAP_HEIGHT {
-            let x0 = buff_x0[y as usize].max(0) as u32;
-            let x1 = buff_x1[y as usize].max(0) as u32;
-            for x in x0..x1 {
-                let cell = map.grid[(y * MAP_WIDTH + x) as usize];
-                if agent.kind == AgentKind::Pedestrian &&
-                        cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) &&
-                        !cell.intersects(Cell::CROSSWALK) {
-                   location_cost += C.off_path_penalty
-                }
-                if agent.kind == AgentKind::Vehicle {
-                    if !cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) {
-                        location_cost += C.off_path_penalty
-                    }
-
-                    // INNER_LANE goes clock-wise
-                    if cell.intersects(Cell::INNER_LANE) && !on_inner_segment[agent_dir] {
-                        location_cost += C.off_lane_penalty;
-                    }
-                    // we allow _any_ direction at the outerlane corners! (for switching lanes)
-                    if !in_corner && cell.intersects(Cell::OUTER_LANE) && !on_outer_segment[(agent_dir + 2) % 4] {
-                        location_cost += C.off_lane_penalty;
-                    }
-                }
-            }
-        }
-
-        // are we stuck? did we at a lower depth already have this pose?
-        // let stuck_cost = if agent_repeats_lower_depth(Rc::new(node.clone())) { C.stuck_penalty } else { 0.0 };
-
-        // dismiss very minor misplacements... maybe no the best way to do this...
-        // if location_cost <= C.off_lane_penalty && location_cost <= C.off_path_penalty {
-        //     location_cost = 0.0;
-        // }
-
-        collision_cost + location_cost // + stuck_cost
+        folk_cost + internalization_cost
     }
 
     fn ordering_cost(&self, node: &SearchNode<SearchState>) -> f32 {
-        node.path_cost
+        if node.path_cost.is_infinite() {
+            return node.path_cost;
+        }
+        let agent = node.state.agents[node.state.agent_i];
+        let folk_heuristic = if agent.folk_theory == 0.0 {
+            0.0
+        } else {
+            agent.folk_theory * folk_heuristic_cost(node)
+        };
+        node.path_cost + folk_heuristic
     }
 
     fn expand_state(&self, node: &SearchNode<SearchState>) -> Box<Iterator<Item = SearchState>> {
@@ -2063,9 +1961,11 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
     }
 }
 
-fn internalization_theory_weights(map: &WorldMap, agents: &[Agent],
-                                  forward_predictions: Rc<Vec<Vec<Agent>>>,
-                                  actions: &[Action], agent_i: usize) -> Vec<f32> {
+// combined weights for folk, internalization, and choice restriction theories
+// restricted choices manifest as f32::MAX weights.
+fn search_weights(map: &WorldMap, agents: &[Agent],
+                                       forward_predictions: Rc<Vec<Vec<Agent>>>,
+                                       actions: &[Action], agent_i: usize) -> Vec<f32> {
     let mut weights = vec![0.0; actions.len()];
     let agent = &agents[agent_i];
     if agent.internalization_theory == 0.0 {
@@ -2092,7 +1992,7 @@ fn internalization_theory_weights(map: &WorldMap, agents: &[Agent],
             let result = tree_search(&mut p);
             if let Some(sol) = result {
                 let sol_node = sol.leaf;
-                weights[action_i] = agent.internalization_theory * -sol_node.ordering_cost;
+                weights[action_i] = -sol_node.ordering_cost;
                 if debug_print {
                     println!("Found solution with ordering cost {:.2} at depth {} after expanding {} nodes", sol_node.ordering_cost, sol_node.depth, sol_node.get_expansion_count());
                     let mut node = Rc::new(sol_node.clone());
@@ -2112,8 +2012,16 @@ fn internalization_theory_weights(map: &WorldMap, agents: &[Agent],
     weights
 }
 
-fn choice_restriction_theory_filter(_agents: &[Agent], _agent: &Agent, actions: Vec<(Action, f32)>)
+fn choice_restriction_theory_filter(_agents: &[Agent], _agent: &Agent, mut actions: Vec<(Action, f32)>)
                                     -> Vec<(Action, f32)> {
+    let mut i = 0;
+    while i < actions.len() {
+        if actions[i].1.is_infinite() {
+            actions.swap_remove(i);
+            continue;
+        }
+        i += 1;
+    }
     actions
 }
 
@@ -2157,11 +2065,10 @@ fn choose_action(map: &WorldMap, q: &mut QLearning,
         actions = get_possible_actions(agent);
 
         let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
-        let folk_w = folk_theory_weights(map, agents, forward_predictions.clone(), &actions, agent_i);
-        let internal_w = internalization_theory_weights(map, agents, forward_predictions, &actions, agent_i);
+        let search_w = search_weights(map, agents, forward_predictions.clone(), &actions, agent_i);
         let mut weights = habit_w;
         for i in 0..weights.len() {
-            weights[i] += folk_w[i] + internal_w[i];
+            weights[i] += search_w[i];
         }
 
         let choices = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
@@ -2467,7 +2374,17 @@ fn find_collisions_with(agents: &[Agent], single_agent: Option<usize>) -> Vec<Co
     let bounding_rects = agents.iter().map(|a|
                                         lookup_bounding_rect(a.pose, (a.width, a.length)));
     let bounding_rects = bounding_rects.collect::<Vec<_>>();
-    let agent_rects = agents.iter().map(|a| agent_to_rect32(a)).collect::<Vec<_>>();
+
+    // only precalculate the whole thing for the case of all agent-agent comparisons
+    let mut agent_rects = None;
+    if single_agent.is_none() {
+        agent_rects = Some(agents.iter().map(|a| agent_to_rect32(a)).collect::<Vec<_>>());
+    }
+    // otherwise just do the target agent
+    let mut single_rect = None;
+    if let Some(single_agent) = single_agent {
+        single_rect = Some(agent_to_rect32(&agents[single_agent]));
+    }
 
     let agent1_range = if single_agent.is_none() {
         0..(agents.len() - 1)
@@ -2514,7 +2431,23 @@ fn find_collisions_with(agents: &[Agent], single_agent: Option<usize>) -> Vec<Co
                 continue;
             }
 
-            if !overlaps_rect(&agent_rects[agent1_i], &agent_rects[agent2_i]) {
+            let rect1;
+            let rect2;
+            if let Some(single_agent) = single_agent {
+                if agent1_i == single_agent {
+                    rect1 = single_rect.unwrap();
+                    rect2 = agent_to_rect32(&agents[agent2_i]);
+                } else {
+                    rect1 = agent_to_rect32(&agents[agent1_i]);
+                    rect2 = single_rect.unwrap();
+                }
+            } else {
+                let agent_rects = agent_rects.as_ref().unwrap();
+                rect1 = agent_rects[agent1_i];
+                rect2 = agent_rects[agent2_i];
+            }
+
+            if !overlaps_rect(&rect1, &rect2) {
                 continue;
             }
 
@@ -2530,6 +2463,9 @@ fn find_collisions_with(agents: &[Agent], single_agent: Option<usize>) -> Vec<Co
                 let agent_a = agents[agent_a_i];
                 let agent_b = agents[agent_b_i];
 
+                let rect_a = if agent_a_i == agent1_i { rect1 } else { rect2 };
+                let rect_b = if agent_b_i == agent1_i { rect1 } else { rect2 };
+
                 // project velocities and rects onto agent a's direction of motion
                 let vel_a = get_velocity_vec(&agent_a);
                 let vel_b = get_velocity_vec(&agent_b);
@@ -2541,8 +2477,8 @@ fn find_collisions_with(agents: &[Agent], single_agent: Option<usize>) -> Vec<Co
 
                 let rel_vel = v_a - v_b;
 
-                let (min_a, max_a) = project_rect(&agent_rects[agent_a_i], -theta);
-                let (min_b, max_b) = project_rect(&agent_rects[agent_b_i], -theta);
+                let (min_a, max_a) = project_rect(&rect_a, -theta);
+                let (min_b, max_b) = project_rect(&rect_b, -theta);
                 // how deeply is the front (or behind) of agent a into agent b?
                 let depth = if rel_vel > 0.0 {
                     if max_a < max_b { max_a - min_b } else { 0.0 }

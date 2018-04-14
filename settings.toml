@@ -33,7 +33,7 @@ moral_forgiveness = -8
 stuck_penalty = 10 # unused right now!!!
 
 # for the A-star search processes
-astar_depth = 5
+astar_depth = 2
 search_trip_complete_reward = 100
 
 # for the MDP/Q-Learning processses
