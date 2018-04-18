@@ -108,6 +108,8 @@ struct ConfSettings {
     folk_theory: f32,
     internalization_theory: f32,
     choice_restriction_theory: bool,
+    choice_restriction_threshold: f32,
+    choice_restriction_cost: f32,
 
     // internalization theory search process
     off_path_penalty: f32,
@@ -2081,7 +2083,7 @@ fn internalization_step_cost(node: &SearchNode<SearchState>, collisions: &[Colli
 struct MoralSearchTraits;
 impl SearchProblemTrait<SearchState> for MoralSearchTraits {
     fn is_goal(&self, node: &SearchNode<SearchState>) -> bool {
-        node.state.depth == C.astar_depth || node.path_cost.is_infinite()
+        node.state.depth == C.astar_depth
     }
 
     fn step_cost(&self, node: &SearchNode<SearchState>) -> f32 {
@@ -2101,18 +2103,19 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
         }
 
         let internalization_cost = internalization_step_cost(node, &collisions);
-        if agent.choice_restriction_theory && internalization_cost > 0.0 {
-            return f32::INFINITY;
+        let mut restriction_cost = 0.0;
+        if agent.choice_restriction_theory && internalization_cost > C.choice_restriction_threshold {
+            restriction_cost = C.choice_restriction_cost;
         }
 
         let internalization_cost = agent.internalization_theory * internalization_cost;
-        folk_cost + internalization_cost
+        folk_cost + internalization_cost + restriction_cost
     }
 
     fn ordering_cost(&self, node: &SearchNode<SearchState>) -> f32 {
-        if node.path_cost.is_infinite() {
-            return node.path_cost;
-        }
+        // if node.path_cost.is_infinite() {
+        //     return node.path_cost;
+        // }
         let agent = node.state.agent;
         let folk_heuristic = if agent.folk_theory == 0.0 {
             0.0
@@ -2192,7 +2195,7 @@ fn choice_restriction_theory_filter(_agents: &[Agent], _agent: &Agent, mut actio
                                     -> Vec<(Action, f32)> {
     let mut i = 0;
     while i < actions.len() {
-        if actions[i].1.is_infinite() {
+        if actions[i].1 > C.choice_restriction_cost {
             actions.swap_remove(i);
             continue;
         }
@@ -3214,6 +3217,11 @@ fn evaluate_test_state(mut test_state: WorldStateInner) -> String {
 
     let a = &test_state.agents[0];
     let s = &test_state.stats;
+
+    println!("{}, {}, {}, {}, {}, {}, {}",
+            a.habit_theory, a.folk_theory, a.internalization_theory, a.choice_restriction_theory,
+            s.deaths, s.collisions, s.trips_completed);
+
     format!("{}, {}, {}, {}, {}, {}, {}",
             a.habit_theory, a.folk_theory, a.internalization_theory, a.choice_restriction_theory,
             s.deaths, s.collisions, s.trips_completed)

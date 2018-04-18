@@ -19,18 +19,24 @@ finish_qlearning_at_timestep = 5000000
 
 # For sweeping parameters in the test rig setup
 perform_test = true
-testing_timesteps = 250000
+testing_timesteps = 100000
 sweep_weight_min = 0.0
 sweep_weight_max = 4.0
-sweep_divisions = 8
-parallel_tests_n = 24
+sweep_divisions = 4
+parallel_tests_n = 128
 
 # for a single agent type setup
 use_single_agent_type = true
 habit_theory =  1.0
 folk_theory = 1.0
 internalization_theory = 2.0
-choice_restriction_theory = true
+choice_restriction_theory = false
+# any action of internalization cost greater than this is eliminated
+choice_restriction_threshold = 4
+
+# a large value to label something unchoosable
+# but still distinguish values if needed
+choice_restriction_cost = 1000
 
 # for the intrinsic moral value search processes
 # total penalities if the entire vehicle/pedestrian is off
