@@ -1,5 +1,6 @@
 #![feature(plugin)]
 #![feature(custom_derive)]
+#![feature(duration_from_micros)]
 #![plugin(rocket_codegen)]
 
 extern crate rocket;
@@ -14,6 +15,7 @@ extern crate serde_json;
 #[macro_use] extern crate lazy_static;
 extern crate fnv;
 extern crate config;
+extern crate rayon;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,7 @@ use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
 use rand::{Rng, XorShiftRng};
 use serde::ser::{SerializeStruct, SerializeTuple};
+use rayon::prelude::*;
 
 mod general_search;
 #[allow(unused_imports)]
@@ -41,43 +44,43 @@ use general_search::{PriorityQueue, SearchQueue, SearchProblemTrait, SearchNode,
 #[cfg(test)]
 mod tests;
 
-const MAP_WIDTH: u32 = 74;
-const MAP_HEIGHT: u32 = 74;
+const MAP_WIDTH: u32 = 42;
+const MAP_HEIGHT: u32 = 42;
 const MAP_SIZE: u32 = MAP_WIDTH * MAP_HEIGHT;
 const THETA_PER_INC: f32 = consts::PI / 8.0;
 const TWO_PI_INCS: u32 = ((2.0 * consts::PI) / (THETA_PER_INC) + 0.5) as u32;
 const PI_INCS: u32 = TWO_PI_INCS / 2;
 const PI_OVER_TWO_INCS: u32 = PI_INCS / 2;
-const BUILDING_N: usize = 2;//4;
 const CROSSWALK_N: usize = 6;
 // const EXTRA_OBSTACLE_N: u32 = 6;
 const SPAWN_MARGIN: u32 = 3; // clearance from other agents when spawning
 
-const BUILDING_WIDTH: u32 = 3; // just a facade
-const BUILDING_SPACING: u32 = 12;
+const BUILDING_WIDTH: u32 = 2; // super small, just a facade, hahaha
+const BUILDING_SPACING: u32 = 8;
 const CROSSWALK_WIDTH: u32 = 2;
-const CROSSWALK_SPACING: u32 = 6;
+const CROSSWALK_SPACING: u32 = 4;
 const PEDESTRIAN_SIZE: u32 = 1;
-const VEHICLE_WIDTH: u32 = 4;
-const VEHICLE_LENGTH: u32 = 10;
-const SIDEWALK_MIN_WIDTH: u32 = 3;
-const SIDEWALK_MAX_WIDTH: u32 = 6;
-const LANE_MIN_WIDTH: u32 = 7;
-const LANE_MAX_WIDTH: u32 = 11;
+const VEHICLE_WIDTH: u32 = 2;
+const VEHICLE_LENGTH: u32 = 5;
+const SIDEWALK_MIN_WIDTH: u32 = 2;
+const SIDEWALK_MAX_WIDTH: u32 = 3;
+const LANE_MIN_WIDTH: u32 = 4;
+const LANE_MAX_WIDTH: u32 = 5;
 
 const FROZEN_STEPS: u32 = 6;
 const ATTEMPTS: u32 = 100;
 
 // distance at which the pedestrian is considered adjacent to the building
-const BUILDING_PEDESTRIAN_MARGIN: u32 = 3;
+const BUILDING_PEDESTRIAN_MARGIN: u32 = 1;
 // distance (besides crosswalk) at which the vehicle is considered adjacent to the building
-const BUILDING_VEHICLE_MARGIN: u32 = 6;
+const BUILDING_VEHICLE_MARGIN: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 struct ConfSettings {
 	population_n: usize, // one-half this for each of pedestrians and vehicles
     pedestrian_n: usize, // those on map at one time
     vehicle_n: usize,
+    building_n: usize,
     total_health: u32,
     heal_reward: i32,
 
@@ -89,6 +92,15 @@ struct ConfSettings {
 
     timestep_limit: u32,
     reset_counters_at_timestep: u32,
+    finish_qlearning_at_timestep: u32,
+
+    // for sweeping parameters in the test rig setup
+    perform_test: bool,
+    testing_timesteps: u32,
+    sweep_weight_min: f32,
+    sweep_weight_max: f32,
+    sweep_divisions: i32,
+    parallel_tests_n: usize,
 
     // for single agent type testing
     use_single_agent_type: bool,
@@ -100,6 +112,8 @@ struct ConfSettings {
     // internalization theory search process
     off_path_penalty: f32,
     off_lane_penalty: f32,
+    yeild_crosswalk_penalty: f32,
+    pedestrian_off_weight: f32,
     damage_penalty: f32,
     moral_forgiveness: f32,
     stuck_penalty: f32,
@@ -107,6 +121,8 @@ struct ConfSettings {
     // for astar action search process "folk theory"
     astar_depth: u32,
     search_trip_complete_reward: f32,
+    folk_damage_penalty: f32,
+    folk_distance_weight: f32,
 
     // for the MDP/Q-Learning processses "habit theory"
     state_avoid_dist: u32,
@@ -117,9 +133,8 @@ struct ConfSettings {
     q_discount: f32,
     trip_reward: f32,
     damage_coef: f32,
-    anneal_factor: f32,
-    anneal_start: u32,
-    anneal_end: u32,
+    anneal_start_temp: f32,
+    anneal_end_timesteps: u32,
     debug_choices_after: u32,
 
     fast_steps_per_update: u32,
@@ -266,7 +281,7 @@ fn fill_map_rect(grid: &mut [Cell], left: u32, top: u32,
 }
 
 fn create_buildings(m: &mut WorldMap) {
-    if BUILDING_N <= 1 {
+    if C.building_n <= 1 {
         panic!("Building number too low! must be at least 2 to create destinations.");
     }
 
@@ -278,13 +293,13 @@ fn create_buildings(m: &mut WorldMap) {
                                      (BUILDING_WIDTH - 1) * 2
                                     ) * 2;
     let total_perim = outer_perim + inner_perim;
-    let mut chosen_perims = [0u32; BUILDING_N];
+    let mut chosen_perims = vec![0u32; C.building_n];
 
     let mut ordering = (0..total_perim).collect::<Vec<_>>();
     rng.shuffle(&mut ordering);
     let mut next_ordering_i = 0;
 
-    for i in 0..BUILDING_N {
+    for i in 0..C.building_n {
         let mut perim_loc = 99999;
         for &perim_i in ordering.iter().skip(next_ordering_i) {
             // check that existing buildings are far enough away
@@ -446,10 +461,10 @@ fn create_map() -> WorldMap {
 
     let horiz_road_length_max = MAP_WIDTH - BUILDING_WIDTH * 2 - vert_sidewalk_width * 2;
     let vert_road_length_max = MAP_HEIGHT - BUILDING_WIDTH * 2 - horiz_sidewalk_width * 2;
-    let horiz_road_min_length = (BUILDING_WIDTH + vert_sidewalk_width) * 2 + 2 * vert_road_width;
-    let vert_road_min_length = (BUILDING_WIDTH + horiz_sidewalk_width) * 2 + 2 * horiz_road_width;
-    let horiz_road_length = rng.gen_range(horiz_road_min_length, horiz_road_length_max);
-    let vert_road_length = rng.gen_range(vert_road_min_length, vert_road_length_max);
+    let horiz_road_length_min = (BUILDING_WIDTH + vert_sidewalk_width) * 2 + 2 * vert_road_width;
+    let vert_road_length_min = (BUILDING_WIDTH + horiz_sidewalk_width) * 2 + 2 * horiz_road_width;
+    let horiz_road_length = rng.gen_range(horiz_road_length_min, horiz_road_length_max);
+    let vert_road_length = rng.gen_range(vert_road_length_min, vert_road_length_max);
 
     println!("\nhoriz length: {} vert length: {}", horiz_road_length, vert_road_length);
     println!("horiz width: {} vert width: {}", horiz_road_width, vert_road_width);
@@ -628,11 +643,24 @@ struct WorldStats {
     timesteps: u32,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 struct WorldStateInner {
     map: WorldMap,
     agents: Vec<Agent>,
     stats: WorldStats,
+    q: QLearning,
+}
+
+impl serde::Serialize for WorldStateInner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: serde::Serializer
+    {
+        let mut state = serializer.serialize_struct("WorldStateInner", 3)?;
+        state.serialize_field("map", &self.map)?;
+        state.serialize_field("agents", &self.agents)?;
+        state.serialize_field("stats", &self.stats)?;
+        state.end()
+    }
 }
 
 type WorldState = Arc<Mutex<WorldStateInner>>;
@@ -827,6 +855,39 @@ fn lookup_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
     pose_size_to_bounding_rect(p, size)
 }
 
+#[inline(always)]
+fn obj_bounds_dists_1(bounds1: BoundingRectI32, bounds2: BoundingRectI32) -> (u32, u32)
+{
+    // l for low (min) and h for high (max)
+    let ((lx1, ly1), (hx1, hy1)) = bounds1;
+    let ((lx2, ly2), (hx2, hy2)) = bounds2;
+    let x_diff = if lx1 < lx2 {
+        if hx1 < lx2 { lx2 - hx1 } else { 0 }
+    } else {
+        if hx2 < lx1 { lx1 - hx2 } else { 0 }
+    };
+    let y_diff = if ly1 < ly2 {
+        if hy1 < ly2 { ly2 - hy1 } else { 0 }
+    } else {
+        if hy2 < ly1 { ly1 - hy2 } else { 0 }
+    };
+    (x_diff as u32, y_diff as u32)
+}
+
+// #[inline(always)]
+// fn obj_bounds_dist_1(bounds1: BoundingRectI32, bounds2: BoundingRectI32) -> u32
+// {
+//     let (dx, dy) = obj_bounds_dists_1(bounds1, bounds2);
+//     dx + dy
+// }
+
+#[inline(always)]
+fn obj_dists_1(a: (u32, u32, u32), size_a: (u32, u32),
+              b: (u32, u32, u32), size_b: (u32, u32)) -> (u32, u32)
+{
+    obj_bounds_dists_1(lookup_bounding_rect(a, size_a), lookup_bounding_rect(b, size_b))
+}
+
 // manhattan distance/1 norm, considers that the positions are upper-left corners
 // and that the objects have their sizes expanding to the right and down.
 // uses the bounding box of the rotated objects since this is mainly intended for
@@ -838,20 +899,8 @@ fn lookup_bounding_rect(p: (u32, u32, u32), size: (u32, u32))
 fn obj_dist_1(a: (u32, u32, u32), size_a: (u32, u32),
               b: (u32, u32, u32), size_b: (u32, u32)) -> u32
 {
-    // l for low (min) and h for high (max)
-    let ((lx1, ly1), (hx1, hy1)) = lookup_bounding_rect(a, size_a);
-    let ((lx2, ly2), (hx2, hy2)) = lookup_bounding_rect(b, size_b);
-    let x_diff = if lx1 < lx2 {
-        if hx1 < lx2 { lx2 - hx1 } else { 0 }
-    } else {
-        if hx2 < lx1 { lx1 - hx2 } else { 0 }
-    };
-    let y_diff = if ly1 < ly2 {
-        if hy1 < ly2 { ly2 - hy1 } else { 0 }
-    } else {
-        if hy2 < ly1 { ly1 - hy2 } else { 0 }
-    };
-    (x_diff + y_diff) as u32
+    let (dx, dy) = obj_dists_1(a, size_a, b, size_b);
+    dx + dy
 }
 
 fn calc_total_perim(pts: &RectU32) -> u32 {
@@ -1560,7 +1609,7 @@ impl Action {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, Serialize)]
 struct QStateAvoid {
     vel: i32,
     is_pedestrian: bool,
@@ -1571,7 +1620,7 @@ struct QStateAvoid {
     // other_vel: i32,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, Serialize)]
 struct QStateTarget {
     is_pedestrian: bool,
     x: u32,
@@ -1638,6 +1687,7 @@ fn qstate_target_for_agent(agent: &Agent) -> QStateTarget {
                  }
 }
 
+#[derive(Clone, Serialize)]
 struct QLearning {
     avoid_values: FnvHashMap<QStateAvoid, Vec<f32>>,
     target_values: FnvHashMap<QStateTarget, Vec<f32>>,
@@ -1654,7 +1704,7 @@ impl Default for QLearning {
     }
 }
 
-fn q_target_weights(q: &mut QLearning, select_actions: &[Action], agent: &Agent)
+fn q_target_weights(q: &QLearning, select_actions: &[Action], agent: &Agent)
                     -> Vec<f32> {
     let mut weights = vec![0.0; select_actions.len()];
     let qstate_target = qstate_target_for_agent(agent);
@@ -1674,7 +1724,7 @@ fn q_target_weights(q: &mut QLearning, select_actions: &[Action], agent: &Agent)
     weights
 }
 
-fn q_avoid_weights(q: &mut QLearning, agents: &[Agent],
+fn q_avoid_weights(q: &QLearning, agents: &[Agent],
                    agent_dists: &AgentDistanceTable,
                    select_actions: &[Action], agent_i: usize) -> Vec<f32> {
     let agent = &agents[agent_i];
@@ -1710,7 +1760,7 @@ fn q_avoid_weights(q: &mut QLearning, agents: &[Agent],
     return weights
 }
 
-fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
+fn habit_theory_weights(q: &QLearning, agents: &[Agent],
                         agent_dists: &AgentDistanceTable,
                         select_actions: &[Action], agent_i: usize) -> Vec<f32> {
     let agent = &agents[agent_i];
@@ -1731,10 +1781,10 @@ fn habit_theory_weights(q: &mut QLearning, agents: &[Agent],
 #[derive(Clone)]
 struct SearchState {
     map: Rc<WorldMap>,
-    forward_predictions: Rc<Vec<Rc<Vec<Agent>>>>,
-    forward_bounds: Rc<Vec<Rc<Vec<BoundingRectI32>>>>,
-    agents: Rc<Vec<Agent>>,
-    bounds: Rc<Vec<BoundingRectI32>>,
+    forward_predictions: Arc<Vec<Arc<Vec<Agent>>>>,
+    forward_bounds: Arc<Vec<Arc<Vec<BoundingRectI32>>>>,
+    agents: Arc<Vec<Agent>>,
+    bounds: Arc<Vec<BoundingRectI32>>,
     agent_i: usize,
     agent: Agent,
     action: Action,
@@ -1853,10 +1903,10 @@ fn folk_step_cost(node: &SearchNode<SearchState>, collisions: &[Collision]) -> f
     let mut collision_cost = 0.0;
     for c in collisions {
         if c.agent1_i == state.agent_i {
-            collision_cost += c.damage1 as f32;
+            collision_cost += c.damage1 as f32 * C.folk_damage_penalty;
         }
         if c.agent2_i == state.agent_i {
-            collision_cost += c.damage2 as f32;
+            collision_cost += c.damage2 as f32 * C.folk_damage_penalty;
         }
     }
     1.0 + collision_cost
@@ -1868,9 +1918,13 @@ fn folk_heuristic_cost(node: &SearchNode<SearchState>) -> f32 {
     let agent = &state.agent;
     let building_agent_i = building_i_to_agent_i(agent.destination_building_i);
     let building_agent = state.agents[building_agent_i];
-    let dist = obj_dist_1(agent.pose, (agent.width, agent.length),
-                          building_agent.pose, (building_agent.width, building_agent.length));
-    heuristic_cost += dist as f32 / C.max_forward_vel as f32;
+    let (dx, dy) = obj_dists_1(agent.pose, (agent.width, agent.length),
+                               building_agent.pose, (building_agent.width, building_agent.length));
+    // only pay attention to one dimension, to make it easier
+    // for the agent to go around the block in order to stay in the lanes.
+    let dist = dx.max(dy);
+
+    heuristic_cost += dist as f32 / C.max_forward_vel as f32 * C.folk_distance_weight;
 
     let building_margin = if agent.kind == AgentKind::Pedestrian
                             { BUILDING_PEDESTRIAN_MARGIN } else { BUILDING_VEHICLE_MARGIN };
@@ -1892,22 +1946,28 @@ fn internalization_step_cost(node: &SearchNode<SearchState>, collisions: &[Colli
         }
     }
 
-    // rasterize agent over the map to see if the locations are all okay
-    let agent = &state.agent;
-    let rect = agent_to_rect32(agent);
-    let mut buff_x0 = [-1i32; MAP_HEIGHT as usize];
-    let mut buff_x1 = [-1i32; MAP_HEIGHT as usize];
-    for i in 0..4 {
-        let pt1 = rect[i];
-        let pt2 = rect[(i + 1) % 4];
-        rasterize_poly_line(&mut buff_x0, &mut buff_x1,
-                            pt1.0 as i32, pt1.1 as i32, pt2.0 as i32, pt2.1 as i32);
-    }
-
     let mut location_cost = 0.0;
 
-    // which segment(s) of the road is the vehicle on/by?
+    let agent = &state.agent;
     let map = &state.map;
+
+    if agent.kind == AgentKind::Pedestrian {
+        // simplest case, single pixel/cell
+        let rect = lookup_agent_bounding_rect(agent);
+        let (x, y) = rect.0;
+        let (x, y) = (x.max(0) as u32, y.max(0) as u32);
+        let (x, y) = (x.min(MAP_WIDTH - 1), y.min(MAP_HEIGHT - 1));
+        let cell = map.grid[(y * MAP_WIDTH + x) as usize];
+        if cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) &&
+               !cell.intersects(Cell::CROSSWALK) {
+           location_cost += C.off_path_penalty * C.pedestrian_off_weight
+        }
+        return collision_cost + location_cost;
+    }
+
+    let rect = agent_to_rect32(agent);
+
+    // which segment(s) of the road is the vehicle on/by?
     let mut on_inner_segment = [false; 4];
     let mut on_outer_segment = [false; 4];
     for i in 0..4 {
@@ -1925,43 +1985,97 @@ fn internalization_step_cost(node: &SearchNode<SearchState>, collisions: &[Colli
                     else if agent.pose.2 < PI_OVER_TWO_INCS * 5 / 2 { 1 }
                     else { 0 };
 
-    let map = &state.map;
-    for y in 0..MAP_HEIGHT {
-        let x0 = buff_x0[y as usize].max(0) as u32;
-        let x1 = buff_x1[y as usize].max(0) as u32;
-        for x in x0..x1 {
-            let cell = map.grid[(y * MAP_WIDTH + x) as usize];
-            if agent.kind == AgentKind::Pedestrian &&
-                    cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) &&
-                    !cell.intersects(Cell::CROSSWALK) {
-               location_cost += C.off_path_penalty
-            }
-            if agent.kind == AgentKind::Vehicle {
-                if !cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) {
-                    location_cost += C.off_path_penalty
-                }
+    // check for the simple case that all corners of the vehicle are valid.
+    // if so, finish early!
+    let mut corners_all_valid = true;
+    for i in 0..4 {
+        let (x, y) = rect[i];
+        let (x, y) = (x.max(0.0) as u32, y.max(0.0) as u32);
+        let (x, y) = (x.min(MAP_WIDTH - 1), y.min(MAP_HEIGHT - 1));
+        let cell = map.grid[(y * MAP_WIDTH + x) as usize];
+        if !cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) {
+            corners_all_valid = false;
+            break;
+        }
+        // INNER_LANE goes clock-wise
+        if cell.intersects(Cell::INNER_LANE) && !on_inner_segment[agent_dir] {
+            corners_all_valid = false;
+            break;
+        }
+        // we allow _any_ direction at the outerlane corners! (for switching lanes)
+        if !in_corner && cell.intersects(Cell::OUTER_LANE) && !on_outer_segment[(agent_dir + 2) % 4] {
+            corners_all_valid = false;
+            break;
+        }
+    }
+    if corners_all_valid {
+        return collision_cost;
+    }
 
-                // INNER_LANE goes clock-wise
-                if cell.intersects(Cell::INNER_LANE) && !on_inner_segment[agent_dir] {
-                    location_cost += C.off_lane_penalty;
-                }
-                // we allow _any_ direction at the outerlane corners! (for switching lanes)
-                if !in_corner && cell.intersects(Cell::OUTER_LANE) && !on_outer_segment[(agent_dir + 2) % 4] {
-                    location_cost += C.off_lane_penalty;
+    // rasterize agent over the map to see if the locations are all okay
+    let mut buff_x0 = [-1i32; MAP_HEIGHT as usize];
+    let mut buff_x1 = [-1i32; MAP_HEIGHT as usize];
+    for i in 0..4 {
+        let pt1 = rect[i];
+        let pt2 = rect[(i + 1) % 4];
+        rasterize_poly_line(&mut buff_x0, &mut buff_x1,
+                            pt1.0 as i32, pt1.1 as i32, pt2.0 as i32, pt2.1 as i32);
+    }
+
+    let bounds = lookup_agent_bounding_rect(agent);
+    let mut pedestrian_by_cross_walk = false;
+    for i in 0..state.agents.len() {
+        // pedestrians come first in list
+        let ped = &state.agents[i];
+        if ped.kind != AgentKind::Pedestrian {
+            break;
+        }
+        let ped_bounds = state.bounds[i];
+        let (dx, dy) = obj_bounds_dists_1(bounds, ped_bounds);
+        let dist = dx.max(dy);
+        if dist > CROSSWALK_SPACING {
+            continue;
+        }
+
+        // is there a crosswalk under or next to the pedestrian?
+        let (cx, cy) = ped_bounds.0;
+        for y in (cy - 1)..(cy + 2) {
+            for x in (cx - 1)..(cx + 2) {
+                let (x, y) = (x.max(0) as u32, y.max(0) as u32);
+                let (x, y) = (x.min(MAP_WIDTH - 1), y.min(MAP_HEIGHT - 1));
+                let cell = map.grid[(y * MAP_WIDTH + x) as usize];
+                if cell.intersects(Cell::CROSSWALK) {
+                    pedestrian_by_cross_walk = true;
+                    break;
                 }
             }
         }
     }
 
-    // are we stuck? did we at a lower depth already have this pose?
-    // let stuck_cost = if agent_repeats_lower_depth(Rc::new(node.clone())) { C.stuck_penalty } else { 0.0 };
+    for y in 0..MAP_HEIGHT {
+        let x0 = buff_x0[y as usize].max(0).min(MAP_WIDTH as i32 - 1) as u32;
+        let x1 = buff_x1[y as usize].max(0).min(MAP_WIDTH as i32 - 1) as u32;
+        for x in x0..x1 {
+            let cell = map.grid[(y * MAP_WIDTH + x) as usize];
+            if pedestrian_by_cross_walk && cell.intersects(Cell::CROSSWALK) {
+                location_cost += C.yeild_crosswalk_penalty * (agent.width * agent.length) as f32;
+            }
+            if !cell.intersects(Cell::OUTER_LANE | Cell::INNER_LANE) {
+                location_cost += C.off_path_penalty;
+            }
 
-    // dismiss very minor misplacements... maybe no the best way to do this...
-    // if location_cost <= C.off_lane_penalty && location_cost <= C.off_path_penalty {
-    //     location_cost = 0.0;
-    // }
+            // INNER_LANE goes clock-wise
+            if cell.intersects(Cell::INNER_LANE) && !on_inner_segment[agent_dir] {
+                location_cost += C.off_lane_penalty;
+            }
+            // we allow _any_ direction at the outerlane corners! (for switching lanes)
+            if !in_corner && cell.intersects(Cell::OUTER_LANE) && !on_outer_segment[(agent_dir + 2) % 4] {
+                location_cost += C.off_lane_penalty;
+            }
+        }
+    }
 
-    collision_cost + location_cost // + stuck_cost
+    collision_cost + location_cost / (agent.width * agent.length) as f32
 }
 
 struct MoralSearchTraits;
@@ -1972,9 +2086,8 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
 
     fn step_cost(&self, node: &SearchNode<SearchState>) -> f32 {
         let state = &node.state;
-        let collisions = find_collisions_with(&state.agents,
-                                              Some((state.agent_i, state.agent)),
-                                              Some(&state.bounds));
+        let collisions = find_collisions_with(&state.agents, state.agent_i,
+                                              &state.agent, &state.bounds);
 
         let agent = &state.agent;
         let folk_cost = if agent.folk_theory == 0.0 {
@@ -1982,14 +2095,17 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
         } else {
             agent.folk_theory * folk_step_cost(node, &collisions)
         };
-        let internalization_cost = if agent.internalization_theory == 0.0 {
-            0.0
-        } else {
-            agent.internalization_theory * internalization_step_cost(node, &collisions)
-        };
+
+        if agent.internalization_theory == 0.0 && !agent.choice_restriction_theory {
+            return folk_cost
+        }
+
+        let internalization_cost = internalization_step_cost(node, &collisions);
         if agent.choice_restriction_theory && internalization_cost > 0.0 {
             return f32::INFINITY;
         }
+
+        let internalization_cost = agent.internalization_theory * internalization_cost;
         folk_cost + internalization_cost
     }
 
@@ -2016,19 +2132,21 @@ impl SearchProblemTrait<SearchState> for MoralSearchTraits {
 // combined weights for folk, internalization, and choice restriction theories
 // restricted choices manifest as f32::MAX weights.
 fn search_weights(map: &WorldMap, agents: &[Agent],
-                                       forward_predictions: Rc<Vec<Rc<Vec<Agent>>>>,
-                                       forward_bounds: Rc<Vec<Rc<Vec<BoundingRectI32>>>>,
+                                       forward_predictions: Arc<Vec<Arc<Vec<Agent>>>>,
+                                       forward_bounds: Arc<Vec<Arc<Vec<BoundingRectI32>>>>,
                                        actions: &[Action], agent_i: usize) -> Vec<f32> {
     let mut weights = vec![0.0; actions.len()];
     let agent = &agents[agent_i];
-    if agent.internalization_theory == 0.0 {
+    if agent.folk_theory == 0.0 &&
+       agent.internalization_theory == 0.0 &&
+       !agent.choice_restriction_theory {
         return weights;
     }
 
-    let agents = Rc::new(agents.to_vec());
+    let agents = Arc::new(agents.to_vec());
 
-    let mut rng = repeatable_rand();
-    let debug_print = rng.gen_weighted_bool(10000);
+    // let mut rng = repeatable_rand();
+    let debug_print = false; //rng.gen_weighted_bool(10000);
 
     let map = Rc::new(map.clone());
     for action_i in 0..actions.len() {
@@ -2106,12 +2224,14 @@ fn get_possible_actions(agent: &Agent) -> Vec<Action> {
     get_possible_actions_by(agent.velocity)
 }
 
-fn choose_action(map: &WorldMap, q: &mut QLearning,
-                 agents: &mut [Agent], agent_dists: &AgentDistanceTable,
-                 forward_predictions: Rc<Vec<Rc<Vec<Agent>>>>,
-                 forward_bounds: Rc<Vec<Rc<Vec<BoundingRectI32>>>>,
+fn choose_action(map: &WorldMap, q: &QLearning,
+                 agents: &[Agent], agent_dists: &AgentDistanceTable, stats: &WorldStats,
+                 forward_predictions: Arc<Vec<Arc<Vec<Agent>>>>,
+                 forward_bounds: Arc<Vec<Arc<Vec<BoundingRectI32>>>>,
                  agent_i: usize) -> Action {
+    let mut rng = repeatable_rand(); //rand::thread_rng();
     let actions;
+    let mut best_possible_choice = (Action::Continue, 0.0);
     let choices = {
         let agent = &agents[agent_i];
 
@@ -2125,59 +2245,56 @@ fn choose_action(map: &WorldMap, q: &mut QLearning,
         actions = get_possible_actions(agent);
 
         let habit_w = habit_theory_weights(q, agents, agent_dists, &actions, agent_i);
-        let search_w = search_weights(map, agents, forward_predictions.clone(),
-                                      forward_bounds.clone(), &actions, agent_i);
-        let mut weights = habit_w;
-        for i in 0..weights.len() {
-            weights[i] += search_w[i];
-        }
+        let mut weights = habit_w.clone();
 
-        let choices = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
-        choice_restriction_theory_filter(agents, agent, choices)
+        let choices: Vec<(Action, f32)> = if agent.habit_theory == 0.0 ||
+                                          stats.timesteps > C.finish_qlearning_at_timestep {
+            let search_w = search_weights(map, agents, forward_predictions.clone(),
+                                          forward_bounds.clone(), &actions, agent_i);
+            for i in 0..weights.len() {
+                weights[i] += search_w[i];
+            }
+
+            // if rng.gen_weighted_bool(4000) {
+            //     println!("Habit w: {:?}", habit_w);
+            //     println!("Search w: {:?}", search_w);
+            //     println!("Total w: {:?}", weights);
+            // }
+
+            let cs = weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>();
+
+            best_possible_choice = cs.iter().fold((Action::Nothing, f32::MIN),
+                                                  |a, &c| if c.1 > a.1 { c } else { a });
+
+            choice_restriction_theory_filter(agents, agent, cs)
+        } else {
+            weights.iter().enumerate().map(|(i, &w)| (actions[i], w)).collect::<Vec<_>>()
+        };
+        choices
     };
 
-    let agent = &mut agents[agent_i];
-
-    let mut rng = repeatable_rand(); //rand::thread_rng();
-
-    // if we are a habit-theory agent, prefer exploring a new action first
-    let mut should_explore = false;
-    if agent.habit_theory != 0.0 {
-        // let unexplored_actions = choices.iter().filter(|&&(_a, w)| w == 0.0).count() as u32;
-        // let n_actions = actions.len() as u32;
-        // let explore_one_in = 1 +
-        //                      (C.explore_one_in_max - 1) *
-        //                      (n_actions - unexplored_actions) / n_actions;
-        if q.avoid_empties > C.full_explore_until {
-            should_explore = true;
-        } else {
-            should_explore = rng.gen_weighted_bool(C.explore_one_in_max);
-            if should_explore {
-                agent.explore_actions += 1;
-                if agent.explore_actions > C.explore_consecutive_limit {
-                    should_explore = false;
-                    agent.explore_actions = 0;
-                }
-            } else {
-                agent.explore_actions = 0;
-            }
-        }
+    // restriction theory can dislike all the choices.
+    // so just use the best anyway if none are truly viable.
+    if choices.len() == 0 {
+        return best_possible_choice.0;
     }
 
-    if should_explore {
-        if rng.gen_weighted_bool(10000) {
-            println!("Made decision randomly");
-        }
-        return *rng.choose(&actions).unwrap();
-    } else if agent.habit_theory != 0.0 {
-        let anneal_start_end = (C.anneal_start - C.anneal_end) as f32;
-        let mult_factor = (C.anneal_factor - 1.0) / anneal_start_end;
-        let anneal_factor = 1.0 + (q.avoid_empties - C.anneal_end).max(0) as f32 * mult_factor;
-        let anneal_factor = 1.0 / anneal_factor;
+    let agent = &agents[agent_i];
+
+    if agent.habit_theory != 0.0 {
+        let temp = C.anneal_start_temp + (1.0 - C.anneal_start_temp) /
+                                         C.anneal_end_timesteps as f32 * stats.timesteps as f32;
+        let anneal_factor = 1.0 / temp;
 
         // calculate soft-max of weights
         // and use those values as probabilities to choose the action
-        let exps = choices.iter().map(|&(_a, w)| (w * anneal_factor).exp()).collect::<Vec<_>>();
+        let mut weight_vals = choices.iter().map(|&(_a, w)| w * anneal_factor).collect::<Vec<_>>();
+        let val_max: f32 = weight_vals.iter().fold(f32::MIN, |a, &b| a.max(b));
+        // normalize to maintain precision of exp
+        for i in 0..weight_vals.len() {
+            weight_vals[i] -= val_max;
+        }
+        let exps = weight_vals.iter().map(|&w| w.exp()).collect::<Vec<_>>();
         let exp_sum: f32 = exps.iter().sum();
         let soft_max = exps.iter().map(|exp| exp / exp_sum);
         let running_sum = soft_max.fold(Vec::new(), |mut sums, soft| {
@@ -2186,11 +2303,16 @@ fn choose_action(map: &WorldMap, q: &mut QLearning,
             sums
         });
         let choice_val = rng.gen_range(0.0, 1.0);
-        let choice_i = running_sum.iter().position(|&sum| sum >= choice_val).unwrap();
-        if rng.gen_weighted_bool(10000) {
-            println!("Made probabilistic decision to use {:?}", choices[choice_i]);
-            println!("From choices: {:?}", choices);
+        let choice_i = running_sum.iter().position(|&sum| sum >= choice_val);
+        if choice_i.is_none() {
+            panic!("Problem with choice_val {} and sums {:?} and weight_vals {:?} and exps {:?}\n", choice_val, running_sum, weight_vals, exps);
         }
+        let choice_i = choice_i.unwrap();
+
+        // if rng.gen_weighted_bool(10000) {
+        //     println!("Made probabilistic decision to use {:?}", choices[choice_i]);
+        //     println!("From choices: {:?}", choices);
+        // }
         return choices[choice_i].0;
         // return best_choice.0;
     } else {
@@ -2207,25 +2329,25 @@ fn choose_action(map: &WorldMap, q: &mut QLearning,
                                     .collect::<Vec<_>>();
                 if alt_choices.len() > 0 {
                     let choice = **rng.choose(&alt_choices).unwrap();
-                    if rng.gen_weighted_bool(1000) {
-                        println!("Chose an alternative folk/internaliztion theory choice to avoid doing nothing: {:?}", best_choice.0);
-                        println!("From choices: {:?}", choices);
-                    }
+                    // if rng.gen_weighted_bool(1000) {
+                    //     println!("Chose an alternative folk/internaliztion theory choice to avoid doing nothing: {:?}", best_choice.0);
+                    //     println!("From choices: {:?}", choices);
+                    // }
                     return choice.0;
                 }
             }
-            if rng.gen_weighted_bool(1000) {
-                println!("Made deterministic folk/internaliztion theory choice to use {:?}", best_choice.0);
-                println!("From choices: {:?}", choices);
-            }
+            // if rng.gen_weighted_bool(1000) {
+            //     println!("Made deterministic folk/internaliztion theory choice to use {:?}", best_choice.0);
+            //     println!("From choices: {:?}", choices);
+            // }
             return best_choice.0;
         }
         // choose an equivalent action randomly
         let choice = **rng.choose(&best_choices).unwrap();
-        if rng.gen_weighted_bool(1000) {
-            println!("Randomly chose a best-valued folk/internaliztion theory choice to use {:?}", best_choice.0);
-            println!("From choices: {:?}", choices);
-        }
+        // if rng.gen_weighted_bool(1000) {
+        //     println!("Randomly chose a best-valued folk/internaliztion theory choice to use {:?}", best_choice.0);
+        //     println!("From choices: {:?}", choices);
+        // }
         return choice.0;
     }
 }
@@ -2305,15 +2427,15 @@ fn simple_forward_timestep(agents: &[Agent]) -> Vec<Agent> {
 }
 
 fn calc_forward_predictions_bounds(agents: &[Agent])
-                                        -> (Vec<Rc<Vec<Agent>>>, Vec<Rc<Vec<BoundingRectI32>>>) {
+                                        -> (Vec<Arc<Vec<Agent>>>, Vec<Arc<Vec<BoundingRectI32>>>) {
     if C.use_single_agent_type &&
             C.folk_theory == 0.0 &&
             C.internalization_theory == 0.0 &&
             !C.choice_restriction_theory {
         return (Vec::new(), Vec::new());
     }
-    let mut forward_predictions: Vec<Rc<Vec<Agent>>> = Vec::new();
-    let mut forward_bounds: Vec<Rc<Vec<BoundingRectI32>>> = Vec::new();
+    let mut forward_predictions: Vec<Arc<Vec<Agent>>> = Vec::new();
+    let mut forward_bounds: Vec<Arc<Vec<BoundingRectI32>>> = Vec::new();
     for i in 0..(C.astar_depth + 1) {
         let next_agents;
         if i == 0 {
@@ -2324,22 +2446,32 @@ fn calc_forward_predictions_bounds(agents: &[Agent])
         {
             let new_bounds = next_agents.iter().map(|a| lookup_agent_bounding_rect(a));
             let new_bounds = new_bounds.collect::<Vec<_>>();
-            forward_bounds.push(Rc::new(new_bounds));
+            forward_bounds.push(Arc::new(new_bounds));
         }
-        forward_predictions.push(Rc::new(next_agents));
+        forward_predictions.push(Arc::new(next_agents));
     }
     (forward_predictions, forward_bounds)
 }
 
 fn update_agents(map: &WorldMap, q: &mut QLearning,
-                 agents: &mut [Agent], agent_dists: &AgentDistanceTable) -> Vec<Action> {
+                 agents: &mut [Agent], agent_dists: &AgentDistanceTable,
+                 stats: &WorldStats) -> Vec<Action> {
     let forward_vals = calc_forward_predictions_bounds(agents);
-    let forward_predictions = Rc::new(forward_vals.0);
-    let forward_bounds = Rc::new(forward_vals.1);
-    let actions = (0..agents.len()).map(|i|
-                            choose_action(map, q, agents, agent_dists,
-                                          forward_predictions.clone(),
-                                          forward_bounds.clone(), i)).collect::<Vec<_>>();
+    let forward_predictions = Arc::new(forward_vals.0);
+    let forward_bounds = Arc::new(forward_vals.1);
+    // do in parallel when not just qlearning (which is fairly cheap)
+    let actions;
+    // if stats.timesteps > C.finish_qlearning_at_timestep {
+    //     actions = (0..agents.len()).into_par_iter().map(|i|
+    //                                 choose_action(map, q, agents, agent_dists, stats,
+    //                                               forward_predictions.clone(),
+    //                                               forward_bounds.clone(), i)).collect::<Vec<_>>();
+    // } else {
+        actions = (0..agents.len()).map(|i|
+                                    choose_action(map, q, agents, agent_dists, stats,
+                                                  forward_predictions.clone(),
+                                                  forward_bounds.clone(), i)).collect::<Vec<_>>();
+    // }
     for (i, &action) in actions.iter().enumerate() {
         apply_action(&mut agents[i], action);
 
@@ -2391,63 +2523,144 @@ fn get_velocity_vec(agent: &Agent) -> (f32, f32) {
     (agent.velocity as f32 * sin_t, agent.velocity as f32 * cos_t)
 }
 
-// optionally only looks for collisions where a specified agent index is one of the two agents
-fn find_collisions_with(agents: &[Agent], single_agent: Option<(usize, Agent)>,
-                        precomputed_bounding_rects: Option<&Vec<BoundingRectI32>>) -> Vec<Collision> {
-    let mut collisions = Vec::new();
-
-    let mut bounding_rects;
-    if let Some(precomp_bounds) = precomputed_bounding_rects {
-        bounding_rects = precomp_bounds.clone();
+fn collision_test(agent1: &Agent, agent2: &Agent, rect1: &RectF32, rect2: &RectF32)
+                  -> Option<(i32, i32)> {
+    // use a specialized overlaps_rect method if possible
+    if agent2.kind == AgentKind::Obstacle {
+        if !agent_overlaps_axis_rect(rect1, agent1.pose.2, rect2) {
+            return None;
+        }
+    } else if agent1.kind == AgentKind::Obstacle {
+        if !agent_overlaps_axis_rect(rect2, agent2.pose.2, rect1) {
+            return None;
+        }
     } else {
-        let computed_bounds = agents.iter().map(|a| lookup_agent_bounding_rect(a));
-        bounding_rects = computed_bounds.collect::<Vec<_>>();
+        if !overlaps_rect(rect1, rect2) {
+            return None;
+        }
     }
 
-    // only precalculate the whole thing for the case of all agent-agent comparisons
-    let mut agent_rects = None;
-    if single_agent.is_none() {
-        agent_rects = Some(agents.iter().map(|a| agent_to_rect32(a)).collect::<Vec<_>>());
+    // calculate severity of the collision based on the relative angle of the agents,
+    // penetration depth, relative velocity, and agent type... roughly!
+
+    let mut intensity = 0.0;
+    for &(agent_a, agent_b, rect_a, rect_b) in [(agent1, agent2, rect1, rect2),
+                                                (agent2, agent1, rect2, rect1)].iter() {
+        // project velocities and rects onto agent a's direction of motion
+        let vel_a = get_velocity_vec(&agent_a);
+        let vel_b = get_velocity_vec(&agent_b);
+
+        let theta = agent_a.pose.2 as i32;
+
+        let v_a = rotate_pt(vel_a, -theta).0;
+        let v_b = rotate_pt(vel_b, -theta).0;
+
+        let rel_vel = v_a - v_b;
+
+        let (min_a, max_a) = project_rect(&rect_a, -theta);
+        let (min_b, max_b) = project_rect(&rect_b, -theta);
+        // how deeply is the front (or behind) of agent a into agent b?
+        let depth = if rel_vel > 0.0 {
+            if max_a < max_b { max_a - min_b } else { 0.0 }
+        } else {
+            if min_a > min_b { max_b - min_a } else { 0.0 }
+        };
+        // limit to half-way through the "body" of the agent in this dimension.
+        let depth = depth.min((max_a - min_a) / 2.0);
+
+        let additional_intensity = depth.max(1.0) * rel_vel.abs().max(1.0);
+        intensity += additional_intensity;
+        // if single_agent.is_none() {
+        //     print!("depth {} rel_vel {} for {} ;", depth, rel_vel, additional_intensity);
+        // }
+    }
+
+    if agent1.kind == AgentKind::Obstacle || agent2.kind == AgentKind::Obstacle {
+        intensity *= 2.0; // equal and opposite force exerted because of immovable obj.
+    }
+
+    let mut damage1 = intensity;
+    let mut damage2 = intensity;
+    if agent1.kind == AgentKind::Pedestrian && agent2.kind == AgentKind::Vehicle {
+        damage1 *= 4.0;
+    }
+    if agent2.kind == AgentKind::Pedestrian && agent1.kind == AgentKind::Vehicle {
+        damage2 *= 4.0;
+    }
+    if agent1.kind == AgentKind::Vehicle && agent2.kind == AgentKind::Vehicle {
+        damage1 *= 2.0;
+        damage2 *= 2.0;
+    }
+
+    let (damage1, damage2) = (damage1 as i32, damage2 as i32);
+    // if single_agent.is_none() {
+    //     println!(" {:?} took {:?} and {:?} took {:?}",
+    //              agent1.kind, damage1, agent2.kind, damage2);
+    // }
+    Some((damage1, damage2))
+}
+
+// optionally only looks for collisions where a specified agent index is one of the two agents
+fn find_collisions_with(agents: &[Agent], single_i: usize, single_agent: &Agent,
+                        bounding_rects: &Vec<BoundingRectI32>) -> Vec<Collision> {
+    let mut collisions = Vec::new();
+    if !single_agent.on_map {
+        return collisions;
     }
 
     // otherwise just do the target agent
-    let mut single_rect = None;
-    if let Some((single_i, single_agent)) = single_agent {
-        single_rect = Some(agent_to_rect32(&single_agent));
-        // insert correct bounding_rect for singe_agent
-        bounding_rects[single_i] = lookup_agent_bounding_rect(&single_agent);
+    let single_rect = agent_to_rect32(&single_agent);
+    let single_bounds = lookup_agent_bounding_rect(&single_agent);
+
+    for agent2_i in 0..agents.len() {
+        if single_i == agent2_i {
+            continue;
+        }
+        let agent2 = &agents[agent2_i];
+        if !agent2.on_map {
+            continue;
+        }
+
+        if (single_agent.frozen_steps > 0) &&
+           (agent2.frozen_steps > 0 || agent2.kind == AgentKind::Obstacle) {
+            // old collision
+            continue;
+        }
+
+        let bounds2 = bounding_rects[agent2_i];
+        // first perform lowest-res collision test
+        if !bounds_intersect(single_bounds, bounds2) {
+            continue;
+        }
+
+        let rect2 = agent_to_rect32(&agents[agent2_i]);
+        let damages = collision_test(single_agent, agent2, &single_rect, &rect2);
+        if let Some((damage1, damage2)) = damages {
+            let collision = Collision { agent1_i: single_i, agent2_i, damage1, damage2 };
+            collisions.push(collision);
+        }
     }
 
-    let agent1_range = if single_agent.is_none() {
-        0..(agents.len() - 1)
-    } else {
-        0..agents.len()
-    };
+    collisions
+}
 
-    for agent1_i in agent1_range {
-        let agent1 = agents[agent1_i];
+fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
+    let mut collisions = Vec::new();
+
+    let bounding_rects = agents.iter().map(|a| lookup_agent_bounding_rect(a));
+    let bounding_rects = bounding_rects.collect::<Vec<_>>();
+
+    let agent_rects = agents.iter().map(|a| agent_to_rect32(a)).collect::<Vec<_>>();
+
+    for agent1_i in 0..(agents.len() - 1) {
+        let agent1 = &agents[agent1_i];
         if !agent1.on_map {
             continue;
         }
 
-        let agent2_range;
-        if single_agent.is_none() {
-            agent2_range = (agent1_i + 1)..agents.len();
-        } else {
-            let agent_i = single_agent.unwrap().0;
-            if agent1_i == agent_i {
-                continue;
-            }
-            agent2_range = agent_i..(agent_i + 1);
-        }
-
         let bounds1 = bounding_rects[agent1_i];
-        for agent2_i in agent2_range {
-            // if !single_agent.is_none() && (single_agent.unwrap() != agent1_i &&
-            //                                single_agent.unwrap() != agent2_i) {
-            //     continue; // not relevant for our current search
-            // }
-            let agent2 = agents[agent2_i];
+        for agent2_i in (agent1_i + 1)..agents.len() {
+            let agent2 = &agents[agent2_i];
             if !agent2.on_map {
                 continue;
             }
@@ -2463,118 +2676,29 @@ fn find_collisions_with(agents: &[Agent], single_agent: Option<(usize, Agent)>,
                 continue;
             }
 
-            let rect1;
-            let rect2;
-            if let Some((single_i, _)) = single_agent {
-                if agent1_i == single_i {
-                    rect1 = single_rect.unwrap();
-                    rect2 = agent_to_rect32(&agents[agent2_i]);
-                } else {
-                    rect1 = agent_to_rect32(&agents[agent1_i]);
-                    rect2 = single_rect.unwrap();
-                }
-            } else {
-                let agent_rects = agent_rects.as_ref().unwrap();
-                rect1 = agent_rects[agent1_i];
-                rect2 = agent_rects[agent2_i];
+            let rect1 = agent_rects[agent1_i];
+            let rect2 = agent_rects[agent2_i];
+
+            let damages = collision_test(agent1, agent2, &rect1, &rect2);
+            if let Some((damage1, damage2)) = damages {
+                let collision = Collision { agent1_i, agent2_i, damage1, damage2 };
+                collisions.push(collision);
             }
-
-            // use a specialized overlaps_rect method if possible
-            if agent2.kind == AgentKind::Obstacle {
-                if !agent_overlaps_axis_rect(&rect1, agent1.pose.2, &rect2) {
-                    continue;
-                }
-            } else if agent1.kind == AgentKind::Obstacle {
-                if !agent_overlaps_axis_rect(&rect2, agent2.pose.2, &rect1) {
-                    continue;
-                }
-            } else {
-                if !overlaps_rect(&rect1, &rect2) {
-                    continue;
-                }
-            }
-
-            // if single_agent.is_none() {
-            //     print!("Collision! ");
-            // }
-
-            // calculate severity of the collision based on the relative angle of the agents,
-            // penetration depth, relative velocity, and agent type... roughly!
-
-            let mut intensity = 0.0;
-            for &(agent_a_i, agent_b_i) in [(agent1_i, agent2_i), (agent2_i, agent1_i)].iter() {
-                let agent_a = agents[agent_a_i];
-                let agent_b = agents[agent_b_i];
-
-                let rect_a = if agent_a_i == agent1_i { rect1 } else { rect2 };
-                let rect_b = if agent_b_i == agent1_i { rect1 } else { rect2 };
-
-                // project velocities and rects onto agent a's direction of motion
-                let vel_a = get_velocity_vec(&agent_a);
-                let vel_b = get_velocity_vec(&agent_b);
-
-                let theta = agent_a.pose.2 as i32;
-
-                let v_a = rotate_pt(vel_a, -theta).0;
-                let v_b = rotate_pt(vel_b, -theta).0;
-
-                let rel_vel = v_a - v_b;
-
-                let (min_a, max_a) = project_rect(&rect_a, -theta);
-                let (min_b, max_b) = project_rect(&rect_b, -theta);
-                // how deeply is the front (or behind) of agent a into agent b?
-                let depth = if rel_vel > 0.0 {
-                    if max_a < max_b { max_a - min_b } else { 0.0 }
-                } else {
-                    if min_a > min_b { max_b - min_a } else { 0.0 }
-                };
-                // limit to half-way through the "body" of the agent in this dimension.
-                let depth = depth.min((max_a - min_a) / 2.0);
-
-                let additional_intensity = depth.max(1.0) * rel_vel.abs().max(1.0);
-                intensity += additional_intensity;
-                // if single_agent.is_none() {
-                //     print!("depth {} rel_vel {} for {} ;", depth, rel_vel, additional_intensity);
-                // }
-            }
-
-            if agent1.kind == AgentKind::Obstacle || agent2.kind == AgentKind::Obstacle {
-                intensity *= 2.0; // equal and opposite force exerted because of immovable obj.
-            }
-
-            let mut damage1 = intensity;
-            let mut damage2 = intensity;
-            if agent1.kind == AgentKind::Pedestrian && agent2.kind == AgentKind::Vehicle {
-                damage1 *= 4.0;
-            }
-            if agent2.kind == AgentKind::Pedestrian && agent1.kind == AgentKind::Vehicle {
-                damage2 *= 4.0;
-            }
-            if agent1.kind == AgentKind::Vehicle && agent2.kind == AgentKind::Vehicle {
-                damage1 *= 2.0;
-                damage2 *= 2.0;
-            }
-
-            let (damage1, damage2) = (damage1 as i32, damage2 as i32);
-            let collision = Collision{agent1_i, agent2_i, damage1, damage2};
-            // if single_agent.is_none() {
-            //     println!(" {:?} took {:?} and {:?} took {:?}",
-            //              agent1.kind, damage1, agent2.kind, damage2);
-            // }
-            collisions.push(collision);
         }
     }
 
     collisions
 }
 
-fn find_collisions(agents: &[Agent]) -> Vec<Collision> {
-    find_collisions_with(agents, None, None)
-}
-
 fn clear_from_collision(agents: &mut [Agent], agent_i: usize) {
     // try to move the target agent as little as possible to clear it from all others
     // following a collision
+
+    let bounding_rects = {
+        let bounding_rects = agents.iter().map(|a| lookup_agent_bounding_rect(a));
+        bounding_rects.collect::<Vec<_>>()
+    };
+
     let pose = agents[agent_i].pose;
     for &(dx, dy) in [(1, 1), (-1, -1), (1, -1), (-1, 1),
                      (0, 2), (0, -2), (2, 0), (-2, 0),
@@ -2592,7 +2716,7 @@ fn clear_from_collision(agents: &mut [Agent], agent_i: usize) {
         new_pose.1 = (new_pose.1 as isize + dy).max(1) as u32;
         new_pose.1 = new_pose.1.min(MAP_HEIGHT - 1);
         agents[agent_i].pose = new_pose;
-        if find_collisions_with(agents, Some((agent_i, agents[agent_i])), None).len() == 0 {
+        if find_collisions_with(agents, agent_i, &agents[agent_i], &bounding_rects).len() == 0 {
             // println!("Freed collision by moving agent {} by ({}, {})", agent_i, dx, dy);
             return;
         }
@@ -2821,16 +2945,16 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
     let prior_q_targets = agents.iter().map(|a| qstate_target_for_agent(a)).collect::<Vec<_>>();
     let prior_q_avoids = calc_q_avoids_states(agents, &agent_dists); // here
 
-    let habit_ws = (0..agents.len()).map(|i| {
-        if q.avoid_empties <= C.debug_choices_after {
-            let possible_actions = get_possible_actions(&agents[i]);
-            habit_theory_weights(q, agents, &agent_dists, &possible_actions, i)
-        } else {
-            Vec::new()
-        }
-    }).collect::<Vec<_>>();
+    // let habit_ws = (0..agents.len()).map(|i| {
+    //     if q.avoid_empties <= C.debug_choices_after {
+    //         let possible_actions = get_possible_actions(&agents[i]);
+    //         habit_theory_weights(q, agents, &agent_dists, &possible_actions, i)
+    //     } else {
+    //         Vec::new()
+    //     }
+    // }).collect::<Vec<_>>();
 
-    let actions = update_agents(map, q, agents, &agent_dists); // here
+    let actions = update_agents(map, q, agents, &agent_dists, stats); // here
     let collisions = find_collisions(agents);
     stats.collisions += collisions.len() as u32;
 
@@ -2854,11 +2978,11 @@ fn run_timestep(map: &WorldMap, q: &mut QLearning, agents: &mut [Agent], stats: 
         }
     }
 
-    if collisions.len() > 0 && q.avoid_empties <= C.debug_choices_after {
-        let coll_i = collisions[0].agent1_i;
-        println!("Habit weights w/ vel {} that lead to choose action {:?} with collision result: {:?}",
-                 prior_q_targets[coll_i].vel, actions[coll_i], habit_ws[coll_i]);
-    }
+    // if collisions.len() > 0 && q.avoid_empties <= C.debug_choices_after {
+    //     let coll_i = collisions[0].agent1_i;
+    //     println!("Habit weights w/ vel {} that lead to choose action {:?} with collision result: {:?}",
+    //              prior_q_targets[coll_i].vel, actions[coll_i], habit_ws[coll_i]);
+    // }
 
     let trips_completed = evaluate_trips(map, agents, &agent_dists); // here
     stats.trips_completed += trips_completed.len() as u32;
@@ -3077,6 +3201,71 @@ fn q_avoid_diagnostic(q: &QLearning) {
     println!("{} empties at vel=-1/-2/-3 remain in q_avoid table", empties);
 }
 
+fn evaluate_test_state(mut test_state: WorldStateInner) -> String {
+    test_state.stats.deaths = 0;
+    test_state.stats.collisions = 0;
+    test_state.stats.trips_completed = 0;
+
+    for _ in 0..C.testing_timesteps {
+        run_timestep(&test_state.map, &mut test_state.q,
+                     &mut test_state.agents, &mut test_state.stats);
+        test_state.stats.timesteps += 1;
+    }
+
+    let a = &test_state.agents[0];
+    let s = &test_state.stats;
+    format!("{}, {}, {}, {}, {}, {}, {}",
+            a.habit_theory, a.folk_theory, a.internalization_theory, a.choice_restriction_theory,
+            s.deaths, s.collisions, s.trips_completed)
+}
+
+fn perform_theory_testing(thread_state: &WorldStateInner) {
+    let mut test_results = Vec::new();
+
+    // testing setup. okay to block here. perform in parallel
+    let mut testing_states = Vec::new();
+    let sweep_inc = (C.sweep_weight_max - C.sweep_weight_min) / C.sweep_divisions as f32;
+    for i in 0..C.sweep_divisions {
+        let habit_t = C.sweep_weight_min + i as f32 * sweep_inc;
+        for j in 0..C.sweep_divisions {
+            let folk_t = C.sweep_weight_min + j as f32 * sweep_inc;
+            for k in 0..C.sweep_divisions {
+                let internal_t = C.sweep_weight_min + k as f32 * sweep_inc;
+                for &restricted in [false, true].iter() {
+                    let mut test_state = thread_state.clone();
+                    for a in 0..test_state.agents.len() {
+                        test_state.agents[a].habit_theory = habit_t;
+                        test_state.agents[a].folk_theory = folk_t;
+                        test_state.agents[a].internalization_theory = internal_t;
+                        test_state.agents[a].choice_restriction_theory = restricted;
+                    }
+                    testing_states.push(test_state);
+
+                    if testing_states.len() < C.parallel_tests_n {
+                        continue;
+                    }
+                    test_results.par_extend(
+                        testing_states.into_par_iter().map(|state| evaluate_test_state(state)));
+                    testing_states = Vec::new();
+                }
+            }
+        }
+    }
+    test_results.par_extend(
+        testing_states.into_par_iter().map(|state| evaluate_test_state(state)));
+
+    let mut f = match fs::File::create("evaluation_results.csv") {
+        Ok(f) => f,
+        Err(e) => panic!("file error: {}", e),
+    };
+
+    for result in test_results {
+        writeln!(f, "{}", result).unwrap();
+    }
+
+    println!("Testing all complete!");
+}
+
 fn main() {
     let mut map = create_map();
     setup_map_paths(&mut map);
@@ -3084,8 +3273,10 @@ fn main() {
     let mut agents = create_agents(&mut map);
     setup_agents(&map, &mut agents);
 
-    let state = WorldStateInner {map, agents: agents,
-                                      stats: WorldStats::default()};
+    let mut state = WorldStateInner {map, agents: agents,
+                                     stats: WorldStats::default(),
+                                     q: QLearning::default()};
+    state.q.avoid_empties = q_avoid_count_empties(&state.q);
     let state = Arc::new(Mutex::new(state));
 
     let (io_sender, io_receiver) = channel();
@@ -3103,8 +3294,6 @@ fn main() {
     });
 
     let thread_state = state.clone();
-    let mut q = QLearning::default();
-    q.avoid_empties = q_avoid_count_empties(&q);
 
     let mut iter = 0;
     let mut time_step = 0;
@@ -3115,8 +3304,9 @@ fn main() {
         loop {
             if io_receiver.try_recv().is_ok() {
                 run_slow = !run_slow;
-                q_diagnostic(&q);
-                q_avoid_diagnostic(&q);
+                let thread_state = &mut *thread_state.lock().unwrap();
+                q_diagnostic(&thread_state.q);
+                q_avoid_diagnostic(&thread_state.q);
                 println!("On timestep {}k", time_step / 1000);
             }
             if !simulation_running {
@@ -3126,19 +3316,19 @@ fn main() {
             if run_slow {
                 thread::sleep(std::time::Duration::from_millis(C.slow_step_ms as u64));
             } else if (iter % C.fast_steps_per_update) == 0 {
-                thread::sleep(std::time::Duration::from_millis(1));
+                thread::sleep(std::time::Duration::from_micros(100));
                 iter = 0;
             }
             iter += 1;
             time_step += 1;
 
             let thread_state = &mut *thread_state.lock().unwrap();
-            run_timestep(&thread_state.map, &mut q,
+            run_timestep(&thread_state.map, &mut thread_state.q,
                          &mut thread_state.agents, &mut thread_state.stats);
             thread_state.stats.timesteps = time_step;
 
             if (time_step % C.fast_steps_update_q_empties) == 0 {
-                q.avoid_empties = q_avoid_count_empties(&q);
+                thread_state.q.avoid_empties = q_avoid_count_empties(&thread_state.q);
             }
 
             if time_step >= C.reset_counters_at_timestep && !counter_reset_finished {
@@ -3146,6 +3336,11 @@ fn main() {
                 thread_state.stats.deaths = 0;
                 thread_state.stats.collisions = 0;
                 thread_state.stats.trips_completed = 0;
+            }
+
+            if time_step > C.finish_qlearning_at_timestep && C.perform_test {
+                perform_theory_testing(&thread_state);
+                std::process::exit(0);
             }
 
             if time_step >= C.timestep_limit {

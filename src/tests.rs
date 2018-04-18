@@ -149,6 +149,21 @@ fn test_simple_collision_detection() {
 }
 
 #[test]
+fn test_simple_collisions_with_detection() {
+    let agents = [Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (14, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let bounding_rects = agents.iter().map(|a| lookup_agent_bounding_rect(a)).collect::<Vec<_>>();
+    let collisions = find_collisions_with(&agents, 0, &agents[0], &bounding_rects);
+    assert_eq!(collisions.len(), 0);
+
+    let agents = [Agent{pose: (10, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
+                  Agent{pose: (13, 10, 0), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];
+    let bounding_rects = agents.iter().map(|a| lookup_agent_bounding_rect(a)).collect::<Vec<_>>();
+    let collisions = find_collisions_with(&agents, 0, &agents[0], &bounding_rects);
+    assert_eq!(collisions.len(), 1);
+}
+
+#[test]
 fn test_rotation_collision_detection() {
     let agents = [Agent{pose: (43, 37, 1), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()},
                   Agent{pose: (48, 48, 1), width: 4, length: 10, kind: AgentKind::Vehicle, on_map: true, ..Agent::default()}];

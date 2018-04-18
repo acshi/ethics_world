@@ -1,6 +1,7 @@
 population_n = 24 # one-half this for each of pedestrians and vehicles
-pedestrian_n = 0 # those on map at one time
-vehicle_n = 1
+pedestrian_n = 6 # those on map at one time
+vehicle_n = 2
+building_n = 3
 total_health = 250 # targeting death rate of 1 in 80*365 deaths in 5.4e6 collisions
 heal_reward = 35
 
@@ -11,21 +12,37 @@ max_backward_vel = 1
 brake_power = 2
 
 # for repeatable testing
-timestep_limit = 6000000
+timestep_limit = 5025000
 # when the timstep reaches this, reset all death, etc counters to 0.
 reset_counters_at_timestep = 5000000
+finish_qlearning_at_timestep = 5000000
+
+# For sweeping parameters in the test rig setup
+perform_test = true
+testing_timesteps = 250000
+sweep_weight_min = 0.0
+sweep_weight_max = 4.0
+sweep_divisions = 8
+parallel_tests_n = 24
 
 # for a single agent type setup
 use_single_agent_type = true
-habit_theory = 1.0
-folk_theory = 0.05
-internalization_theory = 1.0
-choice_restriction_theory = false
+habit_theory =  1.0
+folk_theory = 1.0
+internalization_theory = 2.0
+choice_restriction_theory = true
 
 # for the intrinsic moral value search processes
-off_path_penalty = 1 # per pixel, vehicle on sidewalk, pedestrian on road (not sidewalk)
-off_lane_penalty = 0.75
-damage_penalty = 1 # damage multiplier for setting scale
+# total penalities if the entire vehicle/pedestrian is off
+# applied by percentage
+# (when vehicle on sidewalk, pedestrian on road (not sidewalk))
+off_path_penalty = 2
+off_lane_penalty = 1
+yeild_crosswalk_penalty = 2
+# the above are explicitly for vehicles, this scalar can give a different
+# weight/multiplier can modify the above for pedestrians, (1 makes no effect)
+pedestrian_off_weight = 0.5
+damage_penalty = 2 # damage multiplier for setting scale
 # if an agent is "stuck" -- the best option is to not move
 # then actions no worse than this can be additionally considered
 moral_forgiveness = -8
@@ -33,8 +50,10 @@ moral_forgiveness = -8
 stuck_penalty = 10 # unused right now!!!
 
 # for the A-star search processes
-astar_depth = 2
+astar_depth = 3
 search_trip_complete_reward = 100
+folk_damage_penalty = 1
+folk_distance_weight = 0.1 # used by the distance to goal heuristic
 
 # for the MDP/Q-Learning processses
 state_avoid_dist = 10
@@ -49,19 +68,17 @@ q_discount = 0.95
 trip_reward = 100
 damage_coef = 3
 # we use a sort of "simulated annealing" to affect the soft-max probabilistic
-# best choice. damage_coef effectively will be divided by the anneal factor when
-# the number of zero entries in the  q-avoid-table is above the starting number.
-# when it reaches the end number then the damage_coef is as specified above.
-anneal_factor = 12
-anneal_start = 3500 #7500 #800
-anneal_end = 700 #5800 #2100 #300
+# best choice.
+# the factor is basically exp(1/temp) with temp=start_temp*(1 - steps/end_steps)
+anneal_start_temp = 12
+anneal_end_timesteps = 5000000
 
 # NOTE!!! We could also try an Upper Confidaence Bound action selection!
 
 debug_choices_after = 730 #4000 #520
 
 # 400 worked well for q learning, but other stuff needs less
-fast_steps_per_update = 10 # number of timesteps between chances for visualization output
+fast_steps_per_update = 200 # number of timesteps between chances for visualization output
 slow_step_ms = 20 # real time per simulated timestep for visualization
 
  # num timesteps between q avoid table empties recalculation,

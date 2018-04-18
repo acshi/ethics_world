@@ -1,4 +1,4 @@
-var scale = 10;
+var scale = 20;
 
 function update_color(ctx, grid, last_grid, value, color) {
     ctx.fillStyle = color;
@@ -67,7 +67,7 @@ function render() {
         ctx.rotate(-a.theta);
         ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#0088ff";
-        ctx.fillRect(0, 0, scale, scale);
+        ctx.fillRect(0, 0, scale / 2, scale / 2);
         ctx.strokeStyle = "#000000";
         ctx.lineWidth = 1;
         ctx.strokeRect(0, 0, a.width * scale, a.length * scale);
@@ -100,7 +100,7 @@ function render() {
         ctx.rotate(-a.theta);
         ctx.fillRect(0, 0, a.width * scale, a.length * scale);
         ctx.fillStyle = "#ee6600";
-        ctx.fillRect(0, 0, a.width * scale * 2 / 3, a.length * scale * 2 / 3);
+        ctx.fillRect(0, 0, a.width * scale / 2, a.length * scale / 2);
         ctx.font = "30px Arial";
         ctx.textBaseline = "top";
         ctx.fillText("" + a.health, 5, 5);
@@ -131,7 +131,7 @@ function update() {
     r.onreadystatechange = function () {
         if (r.readyState != 4 || r.status != 200) {
             if (r.readyState == 4) {
-                setTimeout(update, 100);
+                setTimeout(update, 200);
             }
             return;
         }
@@ -148,7 +148,7 @@ function update() {
         update_stats();
 
         requestAnimationFrame(render);
-        setTimeout(update, 20);
+        setTimeout(update, 40);
     };
     r.send();
 }
