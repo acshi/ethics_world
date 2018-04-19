@@ -3219,11 +3219,13 @@ fn evaluate_test_state(mut test_state: WorldStateInner) -> String {
     let s = &test_state.stats;
 
     println!("{}, {}, {}, {}, {}, {}, {}",
-            a.habit_theory, a.folk_theory, a.internalization_theory, a.choice_restriction_theory,
+            a.habit_theory, a.folk_theory, a.internalization_theory,
+            if a.choice_restriction_theory { 1 } else { 0 },
             s.deaths, s.collisions, s.trips_completed);
 
     format!("{}, {}, {}, {}, {}, {}, {}",
-            a.habit_theory, a.folk_theory, a.internalization_theory, a.choice_restriction_theory,
+            a.habit_theory, a.folk_theory, a.internalization_theory,
+            if a.choice_restriction_theory { 1 } else { 0 },
             s.deaths, s.collisions, s.trips_completed)
 }
 
@@ -3232,7 +3234,7 @@ fn perform_theory_testing(thread_state: &WorldStateInner) {
 
     // testing setup. okay to block here. perform in parallel
     let mut testing_states = Vec::new();
-    let sweep_inc = (C.sweep_weight_max - C.sweep_weight_min) / C.sweep_divisions as f32;
+    let sweep_inc = (C.sweep_weight_max - C.sweep_weight_min) / (C.sweep_divisions - 1) as f32;
     for i in 0..C.sweep_divisions {
         let habit_t = C.sweep_weight_min + i as f32 * sweep_inc;
         for j in 0..C.sweep_divisions {

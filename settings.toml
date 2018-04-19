@@ -12,7 +12,7 @@ max_backward_vel = 1
 brake_power = 2
 
 # for repeatable testing
-timestep_limit = 5025000
+timestep_limit = 6000000
 # when the timstep reaches this, reset all death, etc counters to 0.
 reset_counters_at_timestep = 5000000
 finish_qlearning_at_timestep = 5000000
@@ -21,7 +21,7 @@ finish_qlearning_at_timestep = 5000000
 perform_test = true
 testing_timesteps = 100000
 sweep_weight_min = 0.0
-sweep_weight_max = 4.0
+sweep_weight_max = 3.0
 sweep_divisions = 4
 parallel_tests_n = 128
 
@@ -30,7 +30,7 @@ use_single_agent_type = true
 habit_theory =  1.0
 folk_theory = 1.0
 internalization_theory = 2.0
-choice_restriction_theory = false
+choice_restriction_theory = true
 # any action of internalization cost greater than this is eliminated
 choice_restriction_threshold = 4
 
@@ -75,7 +75,7 @@ trip_reward = 100
 damage_coef = 3
 # we use a sort of "simulated annealing" to affect the soft-max probabilistic
 # best choice.
-# the factor is basically exp(1/temp) with temp=start_temp*(1 - steps/end_steps)
+# the factor is basically exp(1/temp) with temp ranging linearly from start to 1 at the end.
 anneal_start_temp = 12
 anneal_end_timesteps = 5000000
 
